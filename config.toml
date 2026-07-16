@@ -1,0 +1,39 @@
+# Optional base URL for one DOI download endpoint. The downloader builds:
+#   <base_url>/<doi>
+# Prefer setting one or more base URLs in `.env` with:
+#   PAPER_DOWNLOADER_BASE_URLS=https://first.example,https://second.example
+base_url = ""
+
+# Optional default DOI queue file for `paper-download`.
+# Paths can be relative to this config file or absolute.
+# Example:
+# doi_file = "data/interim/doi_queues/1467-9965_dois.txt"
+doi_file = ""
+
+# Optional list of DOI queue files for unattended multi-journal downloads.
+# The downloader and metadata exporter process them in order when you run
+# `uv run paper-download` or `uv run paper-export-metadata`.
+# Example:
+# doi_files = ["data/interim/doi_queues/1467-9965_dois.txt", "data/interim/doi_queues/2214-6369_dois.txt"]
+doi_files = []
+
+# Email address passed to Crossref's polite pool.
+email = "your_email@example.com"
+
+# Crossref cursor page size. Large values reduce round trips.
+crossref_rows = 1000
+
+# HTTP timeout, in seconds, for metadata and PDF requests.
+timeout_seconds = 60
+
+# Seconds to sleep between DOI downloads. Use 0 for no deliberate pause.
+inter_download_sleep_seconds = 3.0
+
+# Directory for generated DOI queue files and adjacent success/error ledgers.
+dois_dir = "data/interim/doi_queues"
+
+# Directory for exported metadata CSV files.
+metadata_dir = "outputs/metadata"
+
+# Directory for downloaded PDFs.
+pdfs_dir = "outputs/pdfs"

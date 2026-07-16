@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=75.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-downloader"
+version = "0.1.0"
+description = "Download journal article PDFs from an ISSN through DOI metadata and direct HTTP PDF endpoints."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+paper-downloader = "paper_downloader.cli:main"
+paper-issn-to-doi = "paper_downloader.cli:fetch_dois_entrypoint"
+paper-download = "paper_downloader.cli:download_entrypoint"
+paper-export-metadata = "paper_downloader.cli:export_metadata_entrypoint"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.13.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = [
+    "paper_downloader",
+    "paper_downloader.metadata",
+    "paper_downloader.providers",
+]
