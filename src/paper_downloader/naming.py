@@ -15,52 +15,23 @@ from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
+from ._http import (
+    DEFAULT_HTTP_USER_AGENT,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    JsonObject,
+)
 from ._http import fetch_json_payload as _core_fetch_json_payload
 from .models import normalize_doi
 from .providers import crossref, openalex
 
 DOI_FILENAME_MARKER: str = "__doi_"
 DOI_METADATA_CACHE_SIZE: int = 4096
-REQUEST_TIMEOUT_SECONDS: int = 60
-DOI_METADATA_USER_AGENT: str = "paper-downloader/0.1.0"
 TITLE_FILENAME_MAX_STEM_LENGTH: int = 160
 PDF_MAGIC_PREFIX: bytes = b"%PDF-"
 PDF_MIN_VALID_SIZE_BYTES: int = 64
 INVALID_FILENAME_CHARACTERS_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
-GENERIC_PDF_FILENAME_NORMALIZER = re.compile(r"[\s_-]+")
-GENERIC_PDF_FILENAME_STEMS: frozenset[str] = frozenset(
-    {
-        "article",
-        "content",
-        "default",
-        "document",
-        "download",
-        "file",
-        "full text",
-        "fulltext",
-        "main",
-        "paper",
-        "pdf",
-    }
-)
-GENERIC_PDF_FILENAME_TOKENS: frozenset[str] = frozenset(
-    {
-        "article",
-        "content",
-        "default",
-        "document",
-        "download",
-        "file",
-        "full",
-        "main",
-        "paper",
-        "pdf",
-        "text",
-    }
-)
 WHITESPACE_NORMALIZER = re.compile(r"\s+")
 
-JsonObject = dict[str, object]
 JsonFetcher = Callable[[str], JsonObject]
 
 
@@ -68,8 +39,8 @@ def fetch_json_payload(url: str) -> JsonObject:
     """Fetch one JSON object from a metadata endpoint."""
     return _core_fetch_json_payload(
         url,
-        headers={"User-Agent": DOI_METADATA_USER_AGENT},
-        timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+        headers={"User-Agent": DEFAULT_HTTP_USER_AGENT},
+        timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
     )
 
 
@@ -101,63 +72,29 @@ def normalize_title_text(raw_title: object) -> str | None:
     return normalized_title
 
 
-def fetch_crossref_message(
-    doi: str,
-    fetch_json: Callable[[str], JsonObject] = fetch_json_payload,
-) -> JsonObject | None:
-    """Fetch the Crossref `message` object for one DOI."""
-    payload = fetch_json(crossref.build_work_url(doi))
-    message_object = payload.get("message")
-
-    if not isinstance(message_object, dict):
-        return None
-
-    return message_object
-
-
 def fetch_crossref_metadata(
     doi: str,
-    fetch_json: Callable[[str], JsonObject] = fetch_json_payload,
+    fetch_json: JsonFetcher = fetch_json_payload,
 ) -> tuple[str | None, str | None]:
     """Fetch title and year metadata for one DOI from Crossref."""
-    message_object = fetch_crossref_message(doi=doi, fetch_json=fetch_json)
+    message_object = crossref.extract_message(fetch_json(crossref.build_work_url(doi)))
 
     if message_object is None:
         return None, None
 
     title = normalize_title_text(message_object.get("title"))
-    year: str | None = None
 
-    for date_key in ("published", "published-online", "published-print", "issued"):
-        date_object = message_object.get(date_key)
-
-        if not isinstance(date_object, dict):
-            continue
-
-        raw_date_parts = date_object.get("date-parts")
-
-        if not isinstance(raw_date_parts, list) or not raw_date_parts:
-            continue
-
-        first_date_part = raw_date_parts[0]
-
-        if not isinstance(first_date_part, list) or not first_date_part:
-            continue
-
-        raw_year = first_date_part[0]
-
-        if not isinstance(raw_year, int):
-            continue
-
-        year = str(raw_year)
-        break
+    # The provider returns "", "2024", "2024-01", or "2024-01-15"; the year is
+    # always the leading four characters.
+    published_date = crossref.extract_published_date(message_object)
+    year = published_date[:4] or None
 
     return title, year
 
 
 def fetch_openalex_metadata(
     doi: str,
-    fetch_json: Callable[[str], JsonObject] = fetch_json_payload,
+    fetch_json: JsonFetcher = fetch_json_payload,
 ) -> tuple[str | None, str | None]:
     """Fetch title and year metadata for one DOI from OpenAlex."""
     payload = fetch_json(openalex.build_work_url(doi))
@@ -211,64 +148,6 @@ def sanitize_title_for_filename(title: str) -> str | None:
     return cleaned_title
 
 
-def normalize_filename_stem(base_filename: str) -> str:
-    """Normalize one filename stem for generic-name checks."""
-    stem = Path(base_filename).stem.strip().lower()
-    normalized_stem = GENERIC_PDF_FILENAME_NORMALIZER.sub(" ", stem)
-    return normalized_stem.strip()
-
-
-def filename_looks_generic(base_filename: str) -> bool:
-    """Return `True` when the filename is too generic to preserve."""
-    normalized_stem = normalize_filename_stem(base_filename)
-
-    if not normalized_stem:
-        return True
-
-    if normalized_stem in GENERIC_PDF_FILENAME_STEMS:
-        return True
-
-    normalized_tokens = tuple(token for token in normalized_stem.split(" ") if token)
-
-    if not normalized_tokens:
-        return True
-
-    if all(token.isdigit() for token in normalized_tokens):
-        return True
-
-    if all(token in GENERIC_PDF_FILENAME_TOKENS for token in normalized_tokens):
-        return True
-
-    return False
-
-
-def resolve_pdf_base_filename(base_filename: str, doi: str) -> str:
-    """Prefer DOI metadata title over the raw server filename.
-
-    Parameters
-    ----------
-    base_filename:
-        Filename suggested by HTTP headers or URL parsing.
-    doi:
-        DOI used to fetch metadata title candidates.
-
-    Returns
-    -------
-    str
-        Metadata title filename when available, otherwise the original
-        ``base_filename``.
-    """
-    title, _ = lookup_doi_metadata(doi)
-
-    if title is not None:
-        title_stem = sanitize_title_for_filename(title)
-
-        if title_stem is not None:
-            return f"{title_stem}.pdf"
-
-    return base_filename
-
-
 def build_target_pdf_filename(base_filename: str, doi: str) -> str:
     """Build the final saved PDF filename for one DOI."""
     suggested_path = Path(base_filename)
@@ -314,12 +193,29 @@ def pdf_file_bytes_look_valid(pdf_path: Path) -> bool:
     return file_prefix == PDF_MAGIC_PREFIX
 
 
-def collect_completed_doi_suffixes(output_root_dir: Path) -> set[str]:
-    """Collect DOI marker fragments from every saved PDF below one root."""
-    completed_suffixes: set[str] = set()
+def scan_marked_pdf_dois(output_root_dir: Path) -> tuple[set[str], set[str]]:
+    """Split every marked PDF below one root into valid and corrupt sets.
+
+    A "marked" PDF is one whose filename carries a DOI marker fragment, which
+    is how the downloader recognizes its own output on a later resume.
+
+    Parameters
+    ----------
+    output_root_dir:
+        Root directory to walk recursively. A missing directory yields two
+        empty sets rather than an error, because a first run has no output yet.
+
+    Returns
+    -------
+    tuple[set[str], set[str]]
+        DOI marker fragments for files whose bytes look like a real PDF, and
+        fragments for files that carry a marker but failed that check.
+    """
+    valid_pdf_dois: set[str] = set()
+    corrupt_pdf_dois: set[str] = set()
 
     if not output_root_dir.exists():
-        return completed_suffixes
+        return valid_pdf_dois, corrupt_pdf_dois
 
     for pdf_path in output_root_dir.rglob("*.pdf"):
         doi_resume_suffix = extract_doi_resume_suffix_from_filename(pdf_path)
@@ -327,9 +223,15 @@ def collect_completed_doi_suffixes(output_root_dir: Path) -> set[str]:
         if doi_resume_suffix is None:
             continue
 
-        if not pdf_file_bytes_look_valid(pdf_path):
-            continue
+        if pdf_file_bytes_look_valid(pdf_path):
+            valid_pdf_dois.add(doi_resume_suffix)
+        else:
+            corrupt_pdf_dois.add(doi_resume_suffix)
 
-        completed_suffixes.add(doi_resume_suffix)
+    return valid_pdf_dois, corrupt_pdf_dois
 
-    return completed_suffixes
+
+def collect_completed_doi_suffixes(output_root_dir: Path) -> set[str]:
+    """Collect DOI marker fragments from every valid saved PDF below one root."""
+    valid_pdf_dois, _ = scan_marked_pdf_dois(output_root_dir)
+    return valid_pdf_dois

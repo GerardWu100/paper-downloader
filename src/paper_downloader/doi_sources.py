@@ -16,13 +16,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from ._http import JsonObject, extract_object_list
 from ._http import fetch_json_payload as _core_fetch_json_payload
-from .models import normalize_doi
+from .models import normalize_dois_preserving_order
 from .providers import crossref, openalex
 
 OPENALEX_MAX_PER_PAGE: int = 200
+FIRST_CURSOR: str = "*"
 
-JsonObject = dict[str, object]
 JsonFetcher = Callable[[str, dict[str, str] | None], JsonObject]
 
 
@@ -34,57 +35,60 @@ def fetch_json_payload(
     return _core_fetch_json_payload(url, headers=headers)
 
 
+def _non_empty_string(raw_value: object) -> str | None:
+    """Return the value when it is a non-empty string, otherwise `None`."""
+    if not isinstance(raw_value, str) or not raw_value:
+        return None
+
+    return raw_value
+
+
 def _collect_cursor_paginated_dois(
-    *,
-    initial_cursor: str,
-    build_page_url: Callable[[str], str],
     fetch_page: Callable[[str], JsonObject],
     extract_page_dois: Callable[[JsonObject], list[str]],
-    page_has_more: Callable[[JsonObject], bool],
-    next_cursor_from_page: Callable[[JsonObject], str | None],
+    extract_next_cursor: Callable[[JsonObject], str | None],
 ) -> list[str]:
-    """Collect DOI values from one cursor-paginated provider endpoint."""
+    """Collect raw DOI values from one cursor-paginated provider endpoint.
+
+    Parameters
+    ----------
+    fetch_page:
+        Called with a cursor token; returns that page's decoded JSON body.
+    extract_page_dois:
+        Pulls the DOI strings out of one page.
+    extract_next_cursor:
+        Returns the cursor for the following page, or ``None`` to stop. Each
+        provider decides there whether the run is finished.
+
+    Returns
+    -------
+    list[str]
+        DOI strings exactly as the provider supplied them. Normalization is
+        left to the caller so a merged multi-provider list is only cleaned once.
+    """
     collected_dois: list[str] = []
-    cursor = initial_cursor
-    seen_cursors: set[str] = {cursor}
+    cursor: str | None = FIRST_CURSOR
+    seen_cursors: set[str] = {FIRST_CURSOR}
 
-    while True:
-        payload = fetch_page(build_page_url(cursor))
+    while cursor is not None:
+        payload = fetch_page(cursor)
         collected_dois.extend(extract_page_dois(payload))
+        cursor = extract_next_cursor(payload)
 
-        if not page_has_more(payload):
-            break
-
-        next_cursor = next_cursor_from_page(payload)
-
-        if not isinstance(next_cursor, str) or not next_cursor:
-            break
-
-        # Repeated cursors mean the provider is no longer advancing the page
+        # A repeated cursor means the provider is no longer advancing the page
         # token, so stop instead of looping forever.
-        if next_cursor in seen_cursors:
-            break
+        if cursor is not None:
+            if cursor in seen_cursors:
+                break
 
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
+            seen_cursors.add(cursor)
 
-    return normalize_doi_list(collected_dois)
+    return collected_dois
 
 
 def normalize_doi_list(raw_dois: list[str]) -> list[str]:
     """Normalize, de-duplicate, and sort DOI values."""
-    normalized_dois: set[str] = set()
-
-    for raw_doi in raw_dois:
-        candidate_doi = normalize_doi(raw_doi)
-
-        # Blank lines and empty metadata values do not represent real work.
-        if not candidate_doi:
-            continue
-
-        normalized_dois.add(candidate_doi)
-
-    return sorted(normalized_dois)
+    return sorted(normalize_dois_preserving_order(raw_dois))
 
 
 def fetch_openalex_source_id(
@@ -117,65 +121,36 @@ def fetch_openalex_dois(
 
     per_page = min(rows, OPENALEX_MAX_PER_PAGE)
 
-    def build_page_url(cursor: str) -> str:
-        return openalex.build_works_cursor_url(source_id, per_page, cursor)
-
-    def fetch_page(url: str) -> JsonObject:
-        return fetch_json(url, openalex.build_headers())
+    def fetch_page(cursor: str) -> JsonObject:
+        page_url = openalex.build_works_cursor_url(source_id, per_page, cursor)
+        return fetch_json(page_url, openalex.build_headers())
 
     def extract_page_dois(payload: JsonObject) -> list[str]:
-        raw_results = payload.get("results")
+        return [
+            raw_result["doi"]
+            for raw_result in extract_object_list(payload, "results")
+            if isinstance(raw_result.get("doi"), str)
+        ]
 
-        if not isinstance(raw_results, list):
-            return []
+    def extract_next_cursor(payload: JsonObject) -> str | None:
+        # An empty page means the crawl is done regardless of what cursor the
+        # API hands back.
+        if not extract_object_list(payload, "results"):
+            return None
 
-        page_dois: list[str] = []
-
-        for raw_result in raw_results:
-            if not isinstance(raw_result, dict):
-                continue
-
-            raw_doi = raw_result.get("doi")
-
-            if isinstance(raw_doi, str):
-                page_dois.append(raw_doi)
-
-        return page_dois
-
-    def page_has_more(payload: JsonObject) -> bool:
-        raw_results = payload.get("results")
-
-        if not isinstance(raw_results, list) or not raw_results:
-            return False
-
-        meta_object = payload.get("meta")
-
-        if not isinstance(meta_object, dict):
-            return False
-
-        next_cursor = meta_object.get("next_cursor")
-        return isinstance(next_cursor, str) and bool(next_cursor)
-
-    def next_cursor_from_page(payload: JsonObject) -> str | None:
         meta_object = payload.get("meta")
 
         if not isinstance(meta_object, dict):
             return None
 
-        next_cursor = meta_object.get("next_cursor")
+        return _non_empty_string(meta_object.get("next_cursor"))
 
-        if not isinstance(next_cursor, str) or not next_cursor:
-            return None
-
-        return next_cursor
-
-    return _collect_cursor_paginated_dois(
-        initial_cursor="*",
-        build_page_url=build_page_url,
-        fetch_page=fetch_page,
-        extract_page_dois=extract_page_dois,
-        page_has_more=page_has_more,
-        next_cursor_from_page=next_cursor_from_page,
+    return normalize_doi_list(
+        _collect_cursor_paginated_dois(
+            fetch_page,
+            extract_page_dois,
+            extract_next_cursor,
+        )
     )
 
 
@@ -187,70 +162,44 @@ def fetch_crossref_dois(
 ) -> list[str]:
     """Collect DOI values for one ISSN from Crossref."""
 
-    def build_page_url(cursor: str) -> str:
-        return crossref.build_works_cursor_url(issn, rows, cursor, email)
+    def fetch_page(cursor: str) -> JsonObject:
+        page_url = crossref.build_works_cursor_url(issn, rows, cursor, email)
+        return fetch_json(page_url, crossref.build_polite_headers(email))
 
-    def fetch_page(url: str) -> JsonObject:
-        return fetch_json(url, crossref.build_polite_headers(email))
+    def extract_page_items(payload: JsonObject) -> list[JsonObject]:
+        message_object = crossref.extract_message(payload)
+
+        if message_object is None:
+            return []
+
+        return extract_object_list(message_object, "items")
 
     def extract_page_dois(payload: JsonObject) -> list[str]:
-        message_object = payload.get("message")
+        return [
+            raw_item["DOI"]
+            for raw_item in extract_page_items(payload)
+            if isinstance(raw_item.get("DOI"), str)
+        ]
 
-        if not isinstance(message_object, dict):
-            return []
-
-        raw_items = message_object.get("items")
-
-        if not isinstance(raw_items, list):
-            return []
-
-        page_dois: list[str] = []
-
-        for raw_item in raw_items:
-            if not isinstance(raw_item, dict):
-                continue
-
-            raw_doi = raw_item.get("DOI")
-
-            if isinstance(raw_doi, str):
-                page_dois.append(raw_doi)
-
-        return page_dois
-
-    def page_has_more(payload: JsonObject) -> bool:
-        message_object = payload.get("message")
-
-        if not isinstance(message_object, dict):
-            return False
-
-        raw_items = message_object.get("items")
-
-        if not isinstance(raw_items, list) or len(raw_items) < rows:
-            return False
-
-        next_cursor = message_object.get("next-cursor")
-        return isinstance(next_cursor, str) and bool(next_cursor)
-
-    def next_cursor_from_page(payload: JsonObject) -> str | None:
-        message_object = payload.get("message")
-
-        if not isinstance(message_object, dict):
+    def extract_next_cursor(payload: JsonObject) -> str | None:
+        # Crossref keeps returning a cursor past the end of the result set, so
+        # a short page is the reliable signal that the crawl is finished.
+        if len(extract_page_items(payload)) < rows:
             return None
 
-        next_cursor = message_object.get("next-cursor")
+        message_object = crossref.extract_message(payload)
 
-        if not isinstance(next_cursor, str) or not next_cursor:
+        if message_object is None:
             return None
 
-        return next_cursor
+        return _non_empty_string(message_object.get("next-cursor"))
 
-    return _collect_cursor_paginated_dois(
-        initial_cursor="*",
-        build_page_url=build_page_url,
-        fetch_page=fetch_page,
-        extract_page_dois=extract_page_dois,
-        page_has_more=page_has_more,
-        next_cursor_from_page=next_cursor_from_page,
+    return normalize_doi_list(
+        _collect_cursor_paginated_dois(
+            fetch_page,
+            extract_page_dois,
+            extract_next_cursor,
+        )
     )
 
 

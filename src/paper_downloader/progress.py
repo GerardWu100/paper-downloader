@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import chain
 from pathlib import Path
 
 try:
@@ -18,8 +19,12 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from .models import normalize_doi
+from .models import normalize_doi, normalize_dois_preserving_order
 from .naming import collect_completed_doi_suffixes, sanitize_doi_for_filename
+
+# Queue files are named `<issn>_dois.txt`; their ledgers reuse the same stem
+# with a different suffix. One list keeps that convention in a single place.
+QUEUE_FILE_STEM_SUFFIXES: tuple[str, ...] = ("_dois", "_successful", "_errors")
 
 
 @dataclass(frozen=True)
@@ -41,37 +46,15 @@ class ResumeDecisions:
     stale_success_dois: list[str]
 
 
-def normalize_dois(dois: list[str]) -> list[str]:
-    """Normalize a DOI list while preserving first-seen order."""
-    normalized_dois: list[str] = []
-    seen_dois: set[str] = set()
+def strip_queue_file_suffix(dois_file_path: Path) -> str:
+    """Return the queue-file stem without its `_dois`/`_successful`/`_errors` tail."""
+    stem = dois_file_path.stem
 
-    for raw_doi in dois:
-        normalized_doi = normalize_doi(raw_doi)
+    for known_suffix in QUEUE_FILE_STEM_SUFFIXES:
+        if stem.endswith(known_suffix):
+            return stem.removesuffix(known_suffix)
 
-        if not normalized_doi:
-            continue
-
-        if normalized_doi in seen_dois:
-            continue
-
-        seen_dois.add(normalized_doi)
-        normalized_dois.append(normalized_doi)
-
-    return normalized_dois
-
-
-def _normalized_doi_set(dois: set[str] | list[str] | tuple[str, ...]) -> set[str]:
-    """Normalize a DOI collection into the rewrite comparison set."""
-    normalized_dois: set[str] = set()
-
-    for doi in dois:
-        normalized_doi = normalize_doi(doi)
-
-        if normalized_doi:
-            normalized_dois.add(normalized_doi)
-
-    return normalized_dois
+    return stem
 
 
 def _rewrite_locked_text_file(
@@ -125,19 +108,12 @@ def load_dois_from_file(dois_file_path: Path) -> list[str]:
 
             loaded_dois.append(normalized_content)
 
-    return normalize_dois(loaded_dois)
+    return normalize_dois_preserving_order(loaded_dois)
 
 
 def build_batch_progress_files(dois_file_path: Path) -> BatchProgressFiles:
     """Return the queue and ledger paths associated with one DOI batch file."""
-    stem = dois_file_path.stem
-    base_stem = stem
-
-    for known_suffix in ("_dois", "_successful", "_errors"):
-        if base_stem.endswith(known_suffix):
-            base_stem = base_stem.removesuffix(known_suffix)
-            break
-
+    base_stem = strip_queue_file_suffix(dois_file_path)
     success_path = dois_file_path.with_name(f"{base_stem}_successful.txt")
     error_path = dois_file_path.with_name(f"{base_stem}_errors.txt")
 
@@ -190,33 +166,73 @@ def load_logged_doi_list(log_path: Path) -> list[str]:
     return logged_dois
 
 
-def append_progress_entry(
-    log_path: Path,
-    doi: str,
-    fields: dict[str, str] | None = None,
-) -> None:
-    """Append one DOI record to a ledger file."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+def _format_progress_line(doi: str, fields: dict[str, str] | None) -> str:
+    """Format one ledger line for a DOI, with or without trailing fields."""
     normalized_doi = normalize_doi(doi)
+
+    if fields is None:
+        return f"{normalized_doi}\n"
+
+    parts = [f"doi={normalized_doi}"]
+
+    for key, value in fields.items():
+        parts.append(f"{key}={value}")
+
+    return " | ".join(parts) + "\n"
+
+
+def _append_locked_lines(log_path: Path, lines: list[str]) -> None:
+    """Append lines to a ledger in one locked write."""
+    if not lines:
+        return
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     with log_path.open("a", encoding="utf-8") as log_file:
         if fcntl is not None:
             fcntl.flock(log_file.fileno(), fcntl.LOCK_EX)
 
         try:
-            if fields is None:
-                log_file.write(f"{normalized_doi}\n")
-                return
-
-            parts = [f"doi={normalized_doi}"]
-
-            for key, value in fields.items():
-                parts.append(f"{key}={value}")
-
-            log_file.write(" | ".join(parts) + "\n")
+            log_file.write("".join(lines))
         finally:
             if fcntl is not None:
                 fcntl.flock(log_file.fileno(), fcntl.LOCK_UN)
+
+
+def append_progress_entry(
+    log_path: Path,
+    doi: str,
+    fields: dict[str, str] | None = None,
+) -> None:
+    """Append one DOI record to a ledger file."""
+    _append_locked_lines(log_path, [_format_progress_line(doi, fields)])
+
+
+def append_progress_entries(
+    log_path: Path,
+    dois: list[str],
+    fields: dict[str, str] | None = None,
+) -> None:
+    """Append many DOI records that share one field set, in a single write.
+
+    Resume can classify an entire existing PDF library at once, so opening,
+    locking, and closing the ledger per DOI would dominate that phase. All the
+    lines are built first and written under one lock.
+
+    Parameters
+    ----------
+    log_path:
+        Ledger path to append to.
+    dois:
+        DOI values to record, in the order they should appear.
+    fields:
+        Fields shared by every appended row, such as
+        ``{"status": "existing_pdf"}``. ``None`` writes bare DOI lines.
+    """
+    _append_locked_lines(
+        log_path,
+        [_format_progress_line(doi, fields) for doi in dois],
+    )
 
 
 def remove_dois_from_log(
@@ -232,7 +248,7 @@ def remove_dois_from_log(
     dois:
         DOI values to remove from the ledger. Blank DOI values are ignored.
     """
-    dois_to_remove = _normalized_doi_set(dois)
+    dois_to_remove = set(normalize_dois_preserving_order(dois))
 
     if not dois_to_remove:
         return
@@ -256,7 +272,7 @@ def remove_dois_from_source_queue(
     dois: set[str] | list[str] | tuple[str, ...],
 ) -> None:
     """Remove settled DOI values from the mutable queue file."""
-    dois_to_remove = _normalized_doi_set(dois)
+    dois_to_remove = set(normalize_dois_preserving_order(dois))
 
     if not dois_to_remove:
         return
@@ -290,12 +306,34 @@ def record_batch_outcome(
     errored_dois: set[str],
     doi: str,
     status: str,
+    resolved_error_dois: set[str],
     pdf_path: Path | None = None,
 ) -> None:
     """Record one DOI outcome in the appropriate ledger.
 
-    Queue removal is deferred to a single batch call in the download loop
-    so the queue file is rewritten once per batch rather than once per DOI.
+    Both file rewrites this function could trigger are deferred to one call at
+    the end of the pass: queue removal happens in the download loop, and error
+    rows for DOIs that later succeeded are collected in ``resolved_error_dois``
+    for the caller to clear in a single pass. Rewriting either file per DOI
+    would cost one full read-and-write of the whole file per DOI.
+
+    Parameters
+    ----------
+    progress_files:
+        Queue and ledger paths, or ``None`` when the batch is not resumable.
+    successful_dois:
+        Mutable set of DOI values already written to the success ledger.
+    errored_dois:
+        Mutable set of DOI values currently in the error ledger.
+    doi:
+        DOI whose outcome is being recorded.
+    status:
+        ``"success"`` or an error status such as ``"download_error"``.
+    resolved_error_dois:
+        Mutable set this function adds to when a DOI succeeds after previously
+        failing. The caller passes it to :func:`remove_dois_from_log` once.
+    pdf_path:
+        Saved PDF path recorded alongside a success row.
     """
     if progress_files is None:
         return
@@ -307,7 +345,7 @@ def record_batch_outcome(
         # A DOI that succeeds on a later retry should no longer remain in the
         # error ledger. Keep the ledger aligned with the final outcome.
         if doi in errored_dois:
-            remove_dois_from_log(progress_files.error_path, [doi])
+            resolved_error_dois.add(doi)
             errored_dois.discard(doi)
 
         if doi in successful_dois:
@@ -355,25 +393,11 @@ def reconcile_pending_dois(
     successful_logged_set = {normalize_doi(doi) for doi in successful_logged_dois}
     errored_logged_set = {normalize_doi(doi) for doi in errored_logged_dois}
 
-    candidate_dois: list[str] = []
-    seen_candidate_dois: set[str] = set()
-
-    for doi_group in (
-        source_dois,
-        successful_logged_dois,
-        errored_logged_dois,
-    ):
-        for raw_doi in doi_group:
-            normalized_doi = normalize_doi(raw_doi)
-
-            if not normalized_doi:
-                continue
-
-            if normalized_doi in seen_candidate_dois:
-                continue
-
-            seen_candidate_dois.add(normalized_doi)
-            candidate_dois.append(normalized_doi)
+    # The queue leads, because its order is the order the operator asked for.
+    # Ledger DOIs follow so a queue file trimmed mid-run still reconciles.
+    candidate_dois = normalize_dois_preserving_order(
+        chain(source_dois, successful_logged_dois, errored_logged_dois)
+    )
 
     pending_dois: list[str] = []
     existing_pdf_dois: list[str] = []

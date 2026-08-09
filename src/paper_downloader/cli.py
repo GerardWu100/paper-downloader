@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from .audit import build_download_audit_summary, format_download_audit_summary
@@ -36,6 +38,37 @@ from .progress import (
     derive_issn_from_dois_file,
     load_dois_from_file,
 )
+
+
+@dataclass(frozen=True)
+class CliCommand:
+    """One workflow command, described once and reused by every entrypoint.
+
+    The same description drives three things that used to be written out
+    separately per command: the subcommand registered on the top-level parser,
+    the standalone parser behind that command's console script, and the
+    dispatch table in :func:`main`.
+
+    Parameters
+    ----------
+    name:
+        Subcommand name as typed on the command line.
+    subcommand_help:
+        One-line help shown in the top-level `--help` listing.
+    standalone_description:
+        Parser description shown when the command runs as its own console
+        script, where there is no surrounding workflow to explain it.
+    add_arguments:
+        Registers this command's flags on a parser.
+    run:
+        Executes the command and returns its process exit code.
+    """
+
+    name: str
+    subcommand_help: str
+    standalone_description: str
+    add_arguments: Callable[[argparse.ArgumentParser], None]
+    run: Callable[[argparse.Namespace], int]
 
 
 def add_shared_config_argument(parser: argparse.ArgumentParser) -> None:
@@ -136,59 +169,8 @@ def _add_audit_arguments(parser: argparse.ArgumentParser) -> None:
     add_shared_config_argument(parser)
 
 
-def build_fetch_dois_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Build the DOI-collection subcommand parser."""
-    parser = subparsers.add_parser(
-        "fetch-dois",
-        help=(
-            "Fetch all DOIs for one ISSN and write "
-            "data/interim/doi_queues/<issn>_dois.txt."
-        ),
-    )
-    _add_fetch_dois_arguments(parser)
-    return parser
-
-
-def build_download_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Build the PDF-download subcommand parser."""
-    parser = subparsers.add_parser(
-        "download",
-        help="Download PDFs from one DOI text file or a single DOI.",
-    )
-    _add_download_arguments(parser)
-    return parser
-
-
-def build_export_metadata_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Build the metadata-export subcommand parser."""
-    parser = subparsers.add_parser(
-        "export-metadata",
-        help="Export metadata from one DOI text file into a CSV file.",
-    )
-    _add_export_metadata_arguments(parser)
-    return parser
-
-
-def build_audit_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> argparse.ArgumentParser:
-    """Build the download-audit subcommand parser."""
-    parser = subparsers.add_parser(
-        "audit",
-        help="Summarize local DOI queue, ledger, and PDF completion state.",
-    )
-    _add_audit_arguments(parser)
-    return parser
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse arguments for the top-level CLI with all subcommands registered."""
     parser = argparse.ArgumentParser(
         description=(
             "Two-step DOI workflow: fetch DOI files from an ISSN, then download "
@@ -198,40 +180,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
 
-    build_fetch_dois_parser(subparsers)
-    build_download_parser(subparsers)
-    build_export_metadata_parser(subparsers)
-    build_audit_parser(subparsers)
+    for command in CLI_COMMANDS:
+        command.add_arguments(
+            subparsers.add_parser(command.name, help=command.subcommand_help)
+        )
 
-    parsed_args = parser.parse_args(argv)
-    return parsed_args
+    return parser.parse_args(argv)
+
+
+def _parse_standalone_args(
+    command_name: str,
+    argv: list[str] | None,
+) -> argparse.Namespace:
+    """Parse arguments for one command invoked through its own console script."""
+    command = COMMANDS_BY_NAME[command_name]
+    parser = argparse.ArgumentParser(description=command.standalone_description)
+    command.add_arguments(parser)
+    return parser.parse_args(argv)
 
 
 def parse_fetch_dois_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse arguments for the DOI-collection entrypoint."""
-    parser = argparse.ArgumentParser(
-        description="Fetch all article DOIs for one ISSN into a DOI text file."
-    )
-    _add_fetch_dois_arguments(parser)
-    return parser.parse_args(argv)
+    return _parse_standalone_args("fetch-dois", argv)
 
 
 def parse_download_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse arguments for the download entrypoint."""
-    parser = argparse.ArgumentParser(
-        description="Download PDFs from one DOI text file or a single DOI."
-    )
-    _add_download_arguments(parser)
-    return parser.parse_args(argv)
+    return _parse_standalone_args("download", argv)
 
 
 def parse_export_metadata_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse arguments for the metadata-export entrypoint."""
-    parser = argparse.ArgumentParser(
-        description="Export article metadata from one DOI text file into CSV."
-    )
-    _add_export_metadata_arguments(parser)
-    return parser.parse_args(argv)
+    return _parse_standalone_args("export-metadata", argv)
 
 
 def _cli_or_config(
@@ -429,6 +409,53 @@ def run_audit(parsed_args: argparse.Namespace) -> int:
     return 0
 
 
+CLI_COMMANDS: tuple[CliCommand, ...] = (
+    CliCommand(
+        name="fetch-dois",
+        subcommand_help=(
+            "Fetch all DOIs for one ISSN and write "
+            "data/interim/doi_queues/<issn>_dois.txt."
+        ),
+        standalone_description=(
+            "Fetch all article DOIs for one ISSN into a DOI text file."
+        ),
+        add_arguments=_add_fetch_dois_arguments,
+        run=run_fetch_dois,
+    ),
+    CliCommand(
+        name="download",
+        subcommand_help="Download PDFs from one DOI text file or a single DOI.",
+        standalone_description=(
+            "Download PDFs from one DOI text file or a single DOI."
+        ),
+        add_arguments=_add_download_arguments,
+        run=run_download,
+    ),
+    CliCommand(
+        name="export-metadata",
+        subcommand_help="Export metadata from one DOI text file into a CSV file.",
+        standalone_description=(
+            "Export article metadata from one DOI text file into CSV."
+        ),
+        add_arguments=_add_export_metadata_arguments,
+        run=run_export_metadata,
+    ),
+    CliCommand(
+        name="audit",
+        subcommand_help="Summarize local DOI queue, ledger, and PDF completion state.",
+        standalone_description=(
+            "Summarize local DOI queue, ledger, and PDF completion state."
+        ),
+        add_arguments=_add_audit_arguments,
+        run=run_audit,
+    ),
+)
+
+COMMANDS_BY_NAME: dict[str, CliCommand] = {
+    command.name: command for command in CLI_COMMANDS
+}
+
+
 def fetch_dois_entrypoint(argv: list[str] | None = None) -> int:
     """Run the DOI-collection entrypoint."""
     parsed_args = parse_fetch_dois_args(argv)
@@ -450,20 +477,12 @@ def export_metadata_entrypoint(argv: list[str] | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Run the top-level workflow CLI with explicit subcommands."""
     parsed_args = parse_args(argv)
+    command = COMMANDS_BY_NAME.get(parsed_args.command)
 
-    if parsed_args.command == "fetch-dois":
-        return run_fetch_dois(parsed_args)
+    if command is None:
+        raise SystemExit(f"Unsupported command: {parsed_args.command}")
 
-    if parsed_args.command == "download":
-        return run_download(parsed_args)
-
-    if parsed_args.command == "export-metadata":
-        return run_export_metadata(parsed_args)
-
-    if parsed_args.command == "audit":
-        return run_audit(parsed_args)
-
-    raise SystemExit(f"Unsupported command: {parsed_args.command}")
+    return command.run(parsed_args)
 
 
 if __name__ == "__main__":

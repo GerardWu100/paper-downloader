@@ -5,12 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import normalize_doi
-from .naming import (
-    extract_doi_resume_suffix_from_filename,
-    pdf_file_bytes_look_valid,
-    sanitize_doi_for_filename,
-)
+from .naming import sanitize_doi_for_filename, scan_marked_pdf_dois
 from .progress import (
     build_batch_progress_files,
     load_dois_from_file,
@@ -31,28 +26,6 @@ class DownloadAuditSummary:
     missing_pdf_after_success_count: int
 
 
-def _scan_marked_pdfs(pdf_root_dir: Path) -> tuple[set[str], set[str]]:
-    """Return DOI marker sets for valid and corrupt marked PDFs."""
-    valid_pdf_dois: set[str] = set()
-    corrupt_pdf_dois: set[str] = set()
-
-    if not pdf_root_dir.exists():
-        return valid_pdf_dois, corrupt_pdf_dois
-
-    for pdf_path in pdf_root_dir.rglob("*.pdf"):
-        doi_suffix = extract_doi_resume_suffix_from_filename(pdf_path)
-
-        if doi_suffix is None:
-            continue
-
-        if pdf_file_bytes_look_valid(pdf_path):
-            valid_pdf_dois.add(doi_suffix)
-        else:
-            corrupt_pdf_dois.add(doi_suffix)
-
-    return valid_pdf_dois, corrupt_pdf_dois
-
-
 def build_download_audit_summary(
     dois_file_path: Path,
     pdf_root_dir: Path,
@@ -62,10 +35,10 @@ def build_download_audit_summary(
     progress_files = build_batch_progress_files(dois_file_path)
     success_ledger_dois = load_logged_doi_list(progress_files.success_path)
     error_ledger_dois = load_logged_doi_list(progress_files.error_path)
-    valid_pdf_suffixes, corrupt_pdf_suffixes = _scan_marked_pdfs(pdf_root_dir)
+    valid_pdf_suffixes, corrupt_pdf_suffixes = scan_marked_pdf_dois(pdf_root_dir)
     source_doi_suffixes = {sanitize_doi_for_filename(doi) for doi in source_dois}
     success_doi_suffixes = {
-        sanitize_doi_for_filename(normalize_doi(doi)) for doi in success_ledger_dois
+        sanitize_doi_for_filename(doi) for doi in success_ledger_dois
     }
     pending_doi_suffixes = (
         source_doi_suffixes - valid_pdf_suffixes - success_doi_suffixes

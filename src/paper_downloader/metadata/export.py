@@ -38,6 +38,9 @@ from typing import TextIO
 from urllib.parse import urlsplit
 
 from .. import naming
+from .._http import JsonObject, extract_object_list
+from .._http import fetch_json_payload as _core_fetch_json_payload
+from ..progress import strip_queue_file_suffix
 from ..providers import crossref, openalex
 
 DEFAULT_TIMEOUT_SECONDS: int = 60
@@ -46,7 +49,6 @@ DEFAULT_REQUEST_DELAY_SECONDS: float = 0.05
 MARKUP_TAG_PATTERN = re.compile(r"<[^>]+>")
 ORCID_URL_PREFIX_PATTERN = re.compile(r"^https?://orcid\.org/", re.IGNORECASE)
 
-JsonObject = dict[str, object]
 JsonFetcher = Callable[[str, dict[str, str] | None, int], JsonObject]
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
@@ -101,8 +103,13 @@ def fetch_json_payload(
     headers: dict[str, str] | None,
     timeout_seconds: int,
 ) -> JsonObject:
-    """Fetch one JSON object from HTTP."""
-    return crossref.fetch_timed_json_payload(
+    """Fetch one JSON object from HTTP.
+
+    This is the positional-argument form of `_http.fetch_json_payload` that the
+    `JsonFetcher` alias expects, so injected test fetchers and the real one
+    share a signature.
+    """
+    return _core_fetch_json_payload(
         url,
         headers=headers,
         timeout_seconds=timeout_seconds,
@@ -130,23 +137,17 @@ def _join_normalized_name_parts(*parts: object) -> str:
     return " ".join(normalized_parts)
 
 
-def _extract_display_name_list(raw_items: object, field_name: str) -> str:
+def _extract_display_name_list(
+    container: JsonObject,
+    list_field_name: str,
+    name_field_name: str,
+) -> str:
     """Collect one semicolon-delimited list of normalized display names."""
-    if not isinstance(raw_items, list):
-        return ""
-
-    normalized_values: list[str] = []
-
-    for raw_item in raw_items:
-        if not isinstance(raw_item, dict):
-            continue
-
-        normalized_value = _normalize_text(raw_item.get(field_name))
-
-        if normalized_value:
-            normalized_values.append(normalized_value)
-
-    return "; ".join(normalized_values)
+    normalized_values = [
+        _normalize_text(raw_item.get(name_field_name))
+        for raw_item in extract_object_list(container, list_field_name)
+    ]
+    return "; ".join(value for value in normalized_values if value)
 
 
 def _first_nonempty(*values: str) -> str:
@@ -384,282 +385,140 @@ def extract_openalex_abstract(openalex_work: JsonObject | None) -> str:
     return reconstruct_openalex_abstract(raw_inverted_index)
 
 
-def extract_crossref_authors(message_object: JsonObject | None) -> str:
-    """Return a semicolon-delimited author string from Crossref."""
+@dataclass(frozen=True)
+class AuthorRow:
+    """One author's contribution to a work, in a provider-independent shape.
+
+    Crossref and OpenAlex nest author data differently, so each provider gets a
+    small adapter that flattens its payload into these rows. The formatters
+    below then work for both providers.
+
+    Parameters
+    ----------
+    name:
+        Author display name. Empty when the provider supplied no usable name;
+        the affiliation formatter still emits the affiliations in that case.
+    orcid:
+        Bare ORCID identifier, or an empty string when absent.
+    affiliations:
+        Institution names for this author, in provider order.
+    """
+
+    name: str
+    orcid: str
+    affiliations: tuple[str, ...]
+
+
+def _unique_normalized_names(
+    raw_items: list[JsonObject],
+    field_name: str,
+) -> tuple[str, ...]:
+    """Collect normalized display names from one object list, dropping repeats."""
+    collected_names: list[str] = []
+    seen_names: set[str] = set()
+
+    for raw_item in raw_items:
+        normalized_name = _normalize_text(raw_item.get(field_name))
+
+        if not normalized_name or normalized_name in seen_names:
+            continue
+
+        seen_names.add(normalized_name)
+        collected_names.append(normalized_name)
+
+    return tuple(collected_names)
+
+
+def crossref_author_rows(message_object: JsonObject | None) -> list[AuthorRow]:
+    """Flatten the Crossref `author` list into provider-independent rows."""
     if message_object is None:
-        return ""
+        return []
 
-    raw_authors = message_object.get("author")
-
-    if not isinstance(raw_authors, list):
-        return ""
-
-    author_names: list[str] = []
-
-    for raw_author in raw_authors:
-        if not isinstance(raw_author, dict):
-            continue
-
-        full_name = _join_normalized_name_parts(
-            raw_author.get("given"),
-            raw_author.get("family"),
+    return [
+        AuthorRow(
+            name=_join_normalized_name_parts(
+                raw_author.get("given"),
+                raw_author.get("family"),
+            ),
+            orcid=normalize_orcid(raw_author.get("ORCID")),
+            affiliations=_unique_normalized_names(
+                extract_object_list(raw_author, "affiliation"), "name"
+            ),
         )
-
-        if full_name:
-            author_names.append(full_name)
-
-    return "; ".join(author_names)
+        for raw_author in extract_object_list(message_object, "author")
+    ]
 
 
-def extract_openalex_authors(openalex_work: JsonObject | None) -> str:
-    """Return a semicolon-delimited author string from OpenAlex."""
+def openalex_author_rows(openalex_work: JsonObject | None) -> list[AuthorRow]:
+    """Flatten the OpenAlex `authorships` list into provider-independent rows.
+
+    OpenAlex splits each contribution into an `author` object (name, ORCID) and
+    a sibling `institutions` list, so the two are recombined here.
+    """
     if openalex_work is None:
-        return ""
+        return []
 
-    raw_authorships = openalex_work.get("authorships")
+    author_rows: list[AuthorRow] = []
 
-    if not isinstance(raw_authorships, list):
-        return ""
-
-    author_names: list[str] = []
-
-    for raw_authorship in raw_authorships:
-        if not isinstance(raw_authorship, dict):
-            continue
-
+    for raw_authorship in extract_object_list(openalex_work, "authorships"):
         raw_author = raw_authorship.get("author")
 
         if not isinstance(raw_author, dict):
-            continue
+            raw_author = {}
 
-        normalized_name = _normalize_text(raw_author.get("display_name"))
+        author_rows.append(
+            AuthorRow(
+                name=_normalize_text(raw_author.get("display_name")),
+                orcid=normalize_orcid(raw_author.get("orcid")),
+                affiliations=_unique_normalized_names(
+                    extract_object_list(raw_authorship, "institutions"), "display_name"
+                ),
+            )
+        )
 
-        if not normalized_name:
-            continue
-
-        author_names.append(normalized_name)
-
-    return "; ".join(author_names)
+    return author_rows
 
 
-def extract_crossref_orcid_ids(message_object: JsonObject | None) -> str:
-    """Return a semicolon-delimited ORCID list from Crossref."""
-    if message_object is None:
-        return ""
+def format_author_names(author_rows: list[AuthorRow]) -> str:
+    """Return a semicolon-delimited list of author names."""
+    return "; ".join(row.name for row in author_rows if row.name)
 
-    raw_authors = message_object.get("author")
 
-    if not isinstance(raw_authors, list):
-        return ""
-
-    normalized_orcids: list[str] = []
+def format_orcid_ids(author_rows: list[AuthorRow]) -> str:
+    """Return a semicolon-delimited list of unique ORCID identifiers."""
+    unique_orcids: list[str] = []
     seen_orcids: set[str] = set()
 
-    for raw_author in raw_authors:
-        if not isinstance(raw_author, dict):
+    for row in author_rows:
+        if not row.orcid or row.orcid in seen_orcids:
             continue
 
-        normalized_orcid = normalize_orcid(raw_author.get("ORCID"))
+        seen_orcids.add(row.orcid)
+        unique_orcids.append(row.orcid)
 
-        if not normalized_orcid:
+    return "; ".join(unique_orcids)
+
+
+def format_affiliations(author_rows: list[AuthorRow]) -> str:
+    """Return author-to-affiliation mappings as `name: inst1, inst2; ...`.
+
+    Authors with no affiliations are omitted. An affiliated author with no
+    usable name contributes just the institution list, with no `name:` prefix.
+    """
+    formatted_authors: list[str] = []
+
+    for row in author_rows:
+        if not row.affiliations:
             continue
 
-        if normalized_orcid in seen_orcids:
-            continue
+        joined_affiliations = ", ".join(row.affiliations)
 
-        seen_orcids.add(normalized_orcid)
-        normalized_orcids.append(normalized_orcid)
+        if row.name:
+            formatted_authors.append(f"{row.name}: {joined_affiliations}")
+        else:
+            formatted_authors.append(joined_affiliations)
 
-    return "; ".join(normalized_orcids)
-
-
-def extract_openalex_orcid_ids(openalex_work: JsonObject | None) -> str:
-    """Return a semicolon-delimited ORCID list from OpenAlex."""
-    if openalex_work is None:
-        return ""
-
-    raw_authorships = openalex_work.get("authorships")
-
-    if not isinstance(raw_authorships, list):
-        return ""
-
-    normalized_orcids: list[str] = []
-    seen_orcids: set[str] = set()
-
-    for raw_authorship in raw_authorships:
-        if not isinstance(raw_authorship, dict):
-            continue
-
-        raw_author = raw_authorship.get("author")
-
-        if not isinstance(raw_author, dict):
-            continue
-
-        normalized_orcid = normalize_orcid(raw_author.get("orcid"))
-
-        if not normalized_orcid:
-            continue
-
-        if normalized_orcid in seen_orcids:
-            continue
-
-        seen_orcids.add(normalized_orcid)
-        normalized_orcids.append(normalized_orcid)
-
-    return "; ".join(normalized_orcids)
-
-
-def extract_crossref_affiliations(message_object: JsonObject | None) -> str:
-    """Return author-to-affiliation mappings from Crossref."""
-    if message_object is None:
-        return ""
-
-    raw_authors = message_object.get("author")
-
-    if not isinstance(raw_authors, list):
-        return ""
-
-    author_affiliations: list[str] = []
-
-    for raw_author in raw_authors:
-        if not isinstance(raw_author, dict):
-            continue
-
-        author_name = _join_normalized_name_parts(
-            raw_author.get("given"),
-            raw_author.get("family"),
-        )
-        raw_affiliations = raw_author.get("affiliation")
-
-        if not isinstance(raw_affiliations, list):
-            continue
-
-        normalized_affiliations: list[str] = []
-
-        for raw_affiliation in raw_affiliations:
-            if not isinstance(raw_affiliation, dict):
-                continue
-
-            cleaned_affiliation = _normalize_text(raw_affiliation.get("name"))
-
-            if not cleaned_affiliation:
-                continue
-
-            normalized_affiliations.append(cleaned_affiliation)
-
-        if not normalized_affiliations:
-            continue
-
-        joined_affiliations = ", ".join(normalized_affiliations)
-
-        if author_name:
-            author_affiliations.append(f"{author_name}: {joined_affiliations}")
-            continue
-
-        author_affiliations.append(joined_affiliations)
-
-    return "; ".join(author_affiliations)
-
-
-def extract_openalex_affiliations(openalex_work: JsonObject | None) -> str:
-    """Return author-to-affiliation mappings from OpenAlex institutions."""
-    if openalex_work is None:
-        return ""
-
-    raw_authorships = openalex_work.get("authorships")
-
-    if not isinstance(raw_authorships, list):
-        return ""
-
-    author_affiliations: list[str] = []
-
-    for raw_authorship in raw_authorships:
-        if not isinstance(raw_authorship, dict):
-            continue
-
-        raw_author = raw_authorship.get("author")
-
-        author_name = (
-            _normalize_text(raw_author.get("display_name"))
-            if isinstance(raw_author, dict)
-            else ""
-        )
-
-        raw_institutions = raw_authorship.get("institutions")
-
-        if not isinstance(raw_institutions, list):
-            continue
-
-        normalized_affiliations: list[str] = []
-        seen_affiliations: set[str] = set()
-
-        for raw_institution in raw_institutions:
-            if not isinstance(raw_institution, dict):
-                continue
-
-            cleaned_affiliation = _normalize_text(raw_institution.get("display_name"))
-
-            if not cleaned_affiliation:
-                continue
-
-            if cleaned_affiliation in seen_affiliations:
-                continue
-
-            seen_affiliations.add(cleaned_affiliation)
-            normalized_affiliations.append(cleaned_affiliation)
-
-        if not normalized_affiliations:
-            continue
-
-        joined_affiliations = ", ".join(normalized_affiliations)
-
-        if author_name:
-            author_affiliations.append(f"{author_name}: {joined_affiliations}")
-            continue
-
-        author_affiliations.append(joined_affiliations)
-
-    return "; ".join(author_affiliations)
-
-
-def extract_crossref_published_date(message_object: JsonObject | None) -> str:
-    """Return the best available Crossref publication date string."""
-    if message_object is None:
-        return ""
-
-    # Prefer the generic `published` field, then more specific fallbacks.
-    for date_key in ("published", "published-online", "published-print", "issued"):
-        raw_date_object = message_object.get(date_key)
-
-        if not isinstance(raw_date_object, dict):
-            continue
-
-        raw_date_parts = raw_date_object.get("date-parts")
-
-        if not isinstance(raw_date_parts, list) or not raw_date_parts:
-            continue
-
-        first_date_part = raw_date_parts[0]
-
-        if not isinstance(first_date_part, list) or not first_date_part:
-            continue
-
-        normalized_parts: list[str] = []
-
-        for raw_part in first_date_part[:3]:
-            if not isinstance(raw_part, int):
-                break
-
-            if len(normalized_parts) == 0:
-                normalized_parts.append(f"{raw_part:04d}")
-                continue
-
-            normalized_parts.append(f"{raw_part:02d}")
-
-        if normalized_parts:
-            return "-".join(normalized_parts)
-
-    return ""
+    return "; ".join(formatted_authors)
 
 
 def extract_openalex_published_date(openalex_work: JsonObject | None) -> str:
@@ -761,7 +620,7 @@ def extract_openalex_keywords(openalex_work: JsonObject | None) -> str:
     if openalex_work is None:
         return ""
 
-    return _extract_display_name_list(openalex_work.get("keywords"), "display_name")
+    return _extract_display_name_list(openalex_work, "keywords", "display_name")
 
 
 def extract_openalex_topics(openalex_work: JsonObject | None) -> str:
@@ -769,7 +628,7 @@ def extract_openalex_topics(openalex_work: JsonObject | None) -> str:
     if openalex_work is None:
         return ""
 
-    return _extract_display_name_list(openalex_work.get("topics"), "display_name")
+    return _extract_display_name_list(openalex_work, "topics", "display_name")
 
 
 def build_metadata_record(
@@ -829,20 +688,25 @@ def build_metadata_record(
         extract_crossref_abstract(crossref_message),
         extract_openalex_abstract(openalex_work),
     )
+    # Both author lists are flattened once and reused for the three
+    # author-derived columns, instead of re-walking the payloads per column.
+    crossref_authors = crossref_author_rows(crossref_message)
+    openalex_authors = openalex_author_rows(openalex_work)
+
     authors = _first_nonempty(
-        extract_crossref_authors(crossref_message),
-        extract_openalex_authors(openalex_work),
+        format_author_names(crossref_authors),
+        format_author_names(openalex_authors),
     )
     orcid_ids = _first_nonempty(
-        extract_crossref_orcid_ids(crossref_message),
-        extract_openalex_orcid_ids(openalex_work),
+        format_orcid_ids(crossref_authors),
+        format_orcid_ids(openalex_authors),
     )
     affiliations = _first_nonempty(
-        extract_crossref_affiliations(crossref_message),
-        extract_openalex_affiliations(openalex_work),
+        format_affiliations(crossref_authors),
+        format_affiliations(openalex_authors),
     )
     published_date = _first_nonempty(
-        extract_crossref_published_date(crossref_message),
+        crossref.extract_published_date(crossref_message),
         extract_openalex_published_date(openalex_work),
     )
     journal_title = _first_nonempty(
@@ -853,15 +717,16 @@ def build_metadata_record(
         extract_crossref_publisher(crossref_message),
         extract_openalex_publisher(openalex_work),
     )
+    crossref_subjects = extract_crossref_keywords(crossref_message)
     keywords = _first_nonempty(
         extract_openalex_keywords(openalex_work),
-        extract_crossref_keywords(crossref_message),
+        crossref_subjects,
     )
     # Topics intentionally fall back to Crossref subjects, which is better than
     # leaving the column blank when OpenAlex has no topic list for a DOI.
     topics = _first_nonempty(
         extract_openalex_topics(openalex_work),
-        extract_crossref_keywords(crossref_message),
+        crossref_subjects,
     )
 
     return MetadataRecord(
@@ -884,34 +749,8 @@ def build_default_metadata_csv_path(
     metadata_dir: Path,
 ) -> Path:
     """Return the default CSV path inside the metadata output directory."""
-    stem = dois_file_path.stem
-
-    if stem.endswith("_dois"):
-        output_stem = stem.removesuffix("_dois")
-    else:
-        output_stem = stem
-
+    output_stem = strip_queue_file_suffix(dois_file_path)
     return metadata_dir / f"{output_stem}_metadata.csv"
-
-
-def write_metadata_csv(records: list[MetadataRecord], output_csv_path: Path) -> Path:
-    """Write one metadata CSV file."""
-    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fieldnames = (
-        list(asdict(records[0]).keys())
-        if records
-        else list(MetadataRecord.__annotations__.keys())
-    )
-
-    with output_csv_path.open("w", encoding="utf-8", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for record in records:
-            writer.writerow(asdict(record))
-
-    return output_csv_path
 
 
 def write_ready_metadata_records(
@@ -1065,18 +904,11 @@ def export_metadata_from_dois(
                     next_row_index=next_row_index,
                 )
 
-        if pending_records:
-            for input_index in sorted(pending_records):
-                record = pending_records[input_index]
-                writer.writerow(asdict(record))
-                csv_file.flush()
-
-                if progress_stream is not None:
-                    print(
-                        f"warning: wrote delayed metadata row at input position "
-                        f"{input_index}",
-                        file=progress_stream,
-                        flush=True,
-                    )
+        # Every input position is buffered exactly once above, and the writer
+        # drains each contiguous run as soon as its gap fills, so the buffer is
+        # necessarily empty once the last future has been handled.
+        assert not pending_records, (
+            f"unwritten metadata rows: {sorted(pending_records)}"
+        )
 
     return output_csv_path

@@ -12,6 +12,7 @@ import random
 import re
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from html import unescape
 from http.client import IncompleteRead
@@ -21,9 +22,10 @@ from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from . import naming
+from ._http import DEFAULT_HTTP_USER_AGENT
 from .progress import (
     BatchProgressFiles,
-    append_progress_entry,
+    append_progress_entries,
     load_logged_doi_list,
     reconcile_pending_dois,
     record_batch_outcome,
@@ -31,7 +33,6 @@ from .progress import (
     remove_dois_from_source_queue,
 )
 
-DEFAULT_HTTP_USER_AGENT: str = "paper-downloader/0.1.0"
 CONTENT_DISPOSITION_FILENAME_STAR_PATTERN = re.compile(
     r"filename\*=UTF-8''([^;]+)",
     re.IGNORECASE,
@@ -157,11 +158,10 @@ def fetch_binary_response(
     if referer is not None:
         request_headers["Referer"] = referer
 
-    last_incomplete_read: IncompleteRead | None = None
-
     # Some publisher endpoints close the socket before the declared body length
     # arrives. Retry a few times before treating that partial transfer as a
-    # hard failure.
+    # hard failure. The final attempt re-raises, so the loop always exits by
+    # returning or raising.
     for attempt_number in range(INCOMPLETE_READ_RETRY_COUNT):
         request = Request(url, headers=request_headers, method="GET")
 
@@ -173,9 +173,7 @@ def fetch_binary_response(
                 body = response.read()
                 status_code = getattr(response, "status", 200)
                 final_url = response.geturl()
-        except IncompleteRead as exc:
-            last_incomplete_read = exc
-
+        except IncompleteRead:
             if attempt_number + 1 >= INCOMPLETE_READ_RETRY_COUNT:
                 raise
 
@@ -187,11 +185,6 @@ def fetch_binary_response(
             headers=headers,
             body=body,
         )
-
-    if last_incomplete_read is not None:
-        raise last_incomplete_read
-
-    raise RuntimeError(f"Unreachable fetch state for {url}")
 
 
 def pdf_bytes_look_valid(pdf_bytes: bytes) -> bool:
@@ -436,11 +429,25 @@ def resolve_pdf_response(
 
 def choose_base_filename(
     response: BinaryHttpResponse,
-    doi: str,
     metadata_title: str | None = None,
-    allow_metadata_lookup: bool = True,
 ) -> str:
-    """Choose the base filename before appending the DOI marker."""
+    """Choose the base filename before appending the DOI marker.
+
+    Parameters
+    ----------
+    response:
+        Validated PDF response, used for its `Content-Disposition` header and
+        final URL.
+    metadata_title:
+        Article title from DOI metadata, or ``None`` when the lookup found no
+        title or could not run.
+
+    Returns
+    -------
+    str
+        A `*.pdf` filename. The metadata title is preferred; otherwise the name
+        the server suggested, falling back to ``article.pdf``.
+    """
     content_disposition = response.headers.get("content-disposition")
     response_filename = extract_filename_from_content_disposition(content_disposition)
 
@@ -462,10 +469,7 @@ def choose_base_filename(
         if title_stem is not None:
             return f"{title_stem}.pdf"
 
-    if not allow_metadata_lookup:
-        return response_filename
-
-    return naming.resolve_pdf_base_filename(response_filename, doi)
+    return response_filename
 
 
 def build_output_dir(
@@ -514,23 +518,19 @@ def save_pdf_response(
 
     metadata_title: str | None = None
     publication_year: str | None = None
-    metadata_lookup_succeeded = True
 
-    try:
+    # Metadata only affects the readable filename and optional year folder.
+    # Once the PDF bytes are valid, a metadata outage should not block the save,
+    # so the DOI keeps its fallback filename and lands directly under the ISSN.
+    with suppress(Exception):
         metadata_title, publication_year = naming.lookup_doi_metadata(doi)
-    except Exception:  # noqa: BLE001
-        # Metadata only affects the readable filename and optional year folder.
-        # Once the PDF bytes are valid, a metadata outage should not block save.
-        metadata_lookup_succeeded = False
 
     output_dir = build_output_dir(config.pdf_root_dir, issn, publication_year)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     base_filename = choose_base_filename(
         response=response,
-        doi=doi,
         metadata_title=metadata_title,
-        allow_metadata_lookup=metadata_lookup_succeeded,
     )
     target_filename = naming.build_target_pdf_filename(base_filename, doi)
     target_path = output_dir / target_filename
@@ -656,17 +656,17 @@ def _prepare_resumable_download(
         )
 
     existing_success_set = set(successful_logged_dois)
-
-    for existing_doi in resume_decisions.existing_pdf_dois:
-        if existing_doi in existing_success_set:
-            continue
-
-        append_progress_entry(
-            progress_files.success_path,
-            existing_doi,
-            {"status": "existing_pdf"},
-        )
-        existing_success_set.add(existing_doi)
+    unlogged_existing_dois = [
+        existing_doi
+        for existing_doi in resume_decisions.existing_pdf_dois
+        if existing_doi not in existing_success_set
+    ]
+    append_progress_entries(
+        progress_files.success_path,
+        unlogged_existing_dois,
+        {"status": "existing_pdf"},
+    )
+    existing_success_set.update(unlogged_existing_dois)
 
     # Stale success rows claim a PDF that no longer exists on disk.
     if resume_decisions.stale_success_dois:
@@ -721,6 +721,7 @@ def run_download_pass(
         Optional label such as ``"retry"`` printed in progress lines.
     """
     failed_dois: list[str] = []
+    resolved_error_dois: set[str] = set()
     total_dois = len(dois)
     normalized_label = "" if pass_label is None else f"{pass_label} "
 
@@ -740,6 +741,7 @@ def run_download_pass(
                 errored_dois=errored_dois,
                 doi=doi,
                 status="download_error",
+                resolved_error_dois=resolved_error_dois,
             )
             print(f"[{normalized_label}{doi_index}/{total_dois}] failed {doi}: {exc}")
         else:
@@ -749,6 +751,7 @@ def run_download_pass(
                 errored_dois=errored_dois,
                 doi=doi,
                 status="success",
+                resolved_error_dois=resolved_error_dois,
                 pdf_path=saved_pdf_path,
             )
             print(
@@ -759,6 +762,11 @@ def run_download_pass(
             continue
 
         sleep_fn(config.inter_download_sleep_seconds)
+
+    # Clear the error ledger once for every DOI that succeeded after failing,
+    # instead of rewriting the whole file per DOI inside the loop.
+    if progress_files is not None and resolved_error_dois:
+        remove_dois_from_log(progress_files.error_path, resolved_error_dois)
 
     return failed_dois
 

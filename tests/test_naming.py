@@ -28,26 +28,6 @@ def test_sanitize_title_for_filename_normalizes_text() -> None:
     assert sanitized_title == "Speculating gains losses A test"
 
 
-def test_filename_looks_generic_flags_placeholder_names() -> None:
-    """Generic filenames should be replaced by metadata titles."""
-    assert naming.filename_looks_generic("main.pdf") is True
-    assert naming.filename_looks_generic("paper.pdf") is True
-    assert naming.filename_looks_generic("Some Descriptive Article.pdf") is False
-
-
-def test_resolve_pdf_base_filename_uses_title(monkeypatch) -> None:
-    """Metadata titles should replace the raw server filename."""
-    monkeypatch.setattr(
-        naming,
-        "lookup_doi_metadata",
-        lambda doi: ("A Better Paper Name", "2024"),
-    )
-
-    resolved_filename = naming.resolve_pdf_base_filename("main.pdf", "10.1/example")
-
-    assert resolved_filename == "A Better Paper Name.pdf"
-
-
 def test_lookup_doi_metadata_falls_back_to_openalex(monkeypatch) -> None:
     """OpenAlex should supply metadata when Crossref does not."""
     monkeypatch.setattr(

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from urllib.parse import quote, urlencode
 
-DEFAULT_HTTP_USER_AGENT: str = "paper-downloader/0.1.0"
+from .._http import DEFAULT_HTTP_USER_AGENT
+
 OPENALEX_SOURCE_URL_TEMPLATE: str = "https://api.openalex.org/sources/issn:{issn}"
 OPENALEX_WORKS_URL: str = "https://api.openalex.org/works"
-
-JsonObject = dict[str, object]
 
 
 def build_headers() -> dict[str, str]:

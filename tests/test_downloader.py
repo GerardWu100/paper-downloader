@@ -57,6 +57,33 @@ def test_infer_filename_from_url_drops_encoded_path_segments() -> None:
     assert filename == "paper.pdf"
 
 
+def test_choose_base_filename_prefers_metadata_title() -> None:
+    """A metadata title should win over the filename the server suggested."""
+    response = downloader.BinaryHttpResponse(
+        url="https://publisher.example/download/main.pdf",
+        status_code=200,
+        headers={},
+        body=b"%PDF-1.7",
+    )
+
+    assert (
+        downloader.choose_base_filename(response, "A Better Paper Name")
+        == "A Better Paper Name.pdf"
+    )
+
+
+def test_choose_base_filename_falls_back_to_server_filename() -> None:
+    """Without a metadata title, the server-suggested filename is kept."""
+    response = downloader.BinaryHttpResponse(
+        url="https://publisher.example/download/main.pdf",
+        status_code=200,
+        headers={},
+        body=b"%PDF-1.7",
+    )
+
+    assert downloader.choose_base_filename(response, None) == "main.pdf"
+
+
 def test_download_one_doi_saves_valid_pdf(monkeypatch, tmp_path: Path) -> None:
     """A valid PDF response should be written into the year-specific folder."""
     config = build_config(tmp_path)
