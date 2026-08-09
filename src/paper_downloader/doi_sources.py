@@ -13,8 +13,8 @@ written to disk.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from ._http import fetch_json_payload as _core_fetch_json_payload
 from .models import normalize_doi

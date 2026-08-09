@@ -8,14 +8,15 @@ runs can resume safely.
 
 from __future__ import annotations
 
-from html import unescape
-from http.client import IncompleteRead
 import random
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from html import unescape
+from http.client import IncompleteRead
 from pathlib import Path
-from typing import Callable, TypeAlias
+from typing import TypeAlias
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -24,9 +25,9 @@ from .progress import (
     BatchProgressFiles,
     append_progress_entry,
     load_logged_doi_list,
+    reconcile_pending_dois,
     record_batch_outcome,
     remove_dois_from_log,
-    reconcile_pending_dois,
     remove_dois_from_source_queue,
 )
 

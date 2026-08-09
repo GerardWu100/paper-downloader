@@ -26,6 +26,7 @@
 # In tests/test_metadata_export.py, update test_reconstruct_openalex_abstract_orders_tokens
 # or add a new test:
 
+
 def test_reconstruct_openalex_abstract_handles_position_collisions():
     """When two tokens share the same position, both appear in the output."""
     from paper_downloader.metadata.export import reconstruct_openalex_abstract
@@ -118,13 +119,16 @@ git add -A && git commit -m "fix: reconstruct_openalex_abstract no longer drops 
 ```python
 # In tests/test_cli.py
 
+
 def test_load_env_file_handles_export_prefix():
     """Lines starting with 'export ' should have that prefix stripped."""
     from paper_downloader.config import load_env_file
     from pathlib import Path
     import tempfile
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False, encoding="utf-8") as f:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".env", delete=False, encoding="utf-8"
+    ) as f:
         f.write("export PAPER_DOWNLOADER_BASE_URLS=https://example.com/pdf\n")
         f.write("PAPER_DOWNLOADER_EMAIL=user@example.com\n")
         env_path = Path(f.name)
@@ -160,7 +164,7 @@ def load_env_file(env_path: Path) -> dict[str, str]:
 
             # Strip leading "export " if present (common in .env files and direnv).
             if stripped_line.startswith("export "):
-                stripped_line = stripped_line[len("export "):].lstrip()
+                stripped_line = stripped_line[len("export ") :].lstrip()
 
             key, separator, value = stripped_line.partition("=")
 
@@ -206,6 +210,7 @@ git add -A && git commit -m "fix: load_env_file now strips 'export ' prefix from
 
 ```python
 # In tests/test_progress.py
+
 
 def test_remove_dois_from_source_queue_normalizes_on_write(tmp_path):
     """DOIs in the queue file are normalized (lowercased) after removal."""
@@ -295,6 +300,7 @@ git add -A && git commit -m "fix: remove_dois_from_source_queue now writes norma
 
 ```python
 # In tests/test_naming.py
+
 
 def test_lookup_doi_metadata_skips_openalex_when_crossref_is_complete():
     """OpenAlex is not called when Crossref returns both title and year."""
@@ -610,6 +616,7 @@ git add -A && git commit -m "feat: move inter-download sleep into DownloadConfig
 ```python
 # In tests/test_cli.py
 
+
 def test_load_config_validates_directory_paths(tmp_path):
     """Config directories that point to existing files raise ValueError."""
     from paper_downloader.config import load_config
@@ -629,7 +636,9 @@ def test_load_config_validates_directory_paths(tmp_path):
 
 Add a helper:
 ```python
-def _validate_config_directory(config_path: Path, setting_name: str, resolved_dir: Path) -> None:
+def _validate_config_directory(
+    config_path: Path, setting_name: str, resolved_dir: Path
+) -> None:
     """Validate that one configured directory path is usable.
 
     If the path already exists, it must be a directory (not a file).
@@ -831,8 +840,7 @@ from .storage import save_pdf_response, response_looks_html, pdf_bytes_look_vali
 from .html_resolver import resolve_pdf_response
 
 
-def lookup_optional_doi_metadata(doi: str) -> tuple[str | None, str | None, bool]:
-    ...
+def lookup_optional_doi_metadata(doi: str) -> tuple[str | None, str | None, bool]: ...
 ```
 
 - [ ] **Step 5: Move batch logic into `download/batch.py`**

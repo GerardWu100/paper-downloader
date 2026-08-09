@@ -8,10 +8,11 @@ filesystem work.
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+
+import tomllib
 
 ROOT_DIR: Path = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CONFIG_PATH: Path = ROOT_DIR / "config.toml"

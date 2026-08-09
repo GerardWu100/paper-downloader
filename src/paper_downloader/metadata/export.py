@@ -30,10 +30,11 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import TextIO
 from urllib.parse import urlsplit
 
 from .. import naming

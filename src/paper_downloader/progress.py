@@ -8,9 +8,9 @@ as already-complete work during resume reconciliation.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
 from pathlib import Path
 
 try:
@@ -18,8 +18,8 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from .naming import collect_completed_doi_suffixes, sanitize_doi_for_filename
 from .models import normalize_doi
+from .naming import collect_completed_doi_suffixes, sanitize_doi_for_filename
 
 
 @dataclass(frozen=True)

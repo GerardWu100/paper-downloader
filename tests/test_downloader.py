@@ -825,7 +825,7 @@ def test_fetch_binary_response_retries_incomplete_read(monkeypatch) -> None:
             self.headers = {"Content-Type": "application/pdf"}
             self.status = 200
 
-        def __enter__(self) -> "FakeResponse":
+        def __enter__(self) -> FakeResponse:
             return self
 
         def __exit__(self, exc_type, exc, traceback) -> None:
