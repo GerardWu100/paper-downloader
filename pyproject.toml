@@ -7,7 +7,8 @@ name = "paper-downloader"
 version = "0.1.0"
 description = "Download journal article PDFs from an ISSN through DOI metadata and direct HTTP PDF endpoints."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
 dependencies = []
 
 [project.scripts]
