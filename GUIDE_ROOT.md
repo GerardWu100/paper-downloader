@@ -44,6 +44,15 @@ The downloader is resumable.
   resumed runs unless the operator passes `--retry-error-dois`.
 - Existing PDFs are detected by scanning for the `__doi_...` marker in saved
   filenames and validating that the file bytes start like a real PDF.
+- The marker is unique per DOI. A slash becomes `__` and any character the
+  filesystem rejects becomes `_`, so `10.1111/mafi.12108` reads back plainly as
+  `__doi_10.1111__mafi.12108`. When that substitution would let two different
+  DOIs share one marker, for example `10.1111/mafi:12108` against
+  `10.1111/mafi_12108`, a short digest of the DOI is appended to the second one.
+  Without it, resume would treat a DOI it never downloaded as already complete
+  and skip it on every later run.
+- Temporary `.partial_*` files from a run that died mid-write are swept at the
+  start of each resumable batch.
 - Multiple base URLs can be configured in `.env`, and the downloader picks one
   random starting URL per DOI before exhausting the rest of the list.
 - The batch runner sleeps between DOI downloads using the configured

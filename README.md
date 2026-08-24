@@ -40,7 +40,11 @@ Environment variables (set in `.env`, see `.env.example`):
 
 - `PAPER_DOWNLOADER_BASE_URLS`: comma-separated PDF base URLs, e.g.
   `https://onlinelibrary.wiley.com/doi/pdfdirect,https://onlinelibrary.wiley.com/doi/pdf`
-- `PAPER_DOWNLOADER_EMAIL`: contact email for Crossref's polite pool
+- `PAPER_DOWNLOADER_EMAIL`: your contact email, sent to the Crossref and
+  OpenAlex polite pools. Unset by default, and the project never fills in a
+  placeholder address for you. Setting it gets you faster and more reliable
+  provider responses; `paper-fetch-dois` refuses to run without it, because
+  Crossref DOI collection requires one.
 
 ## Setup
 
@@ -77,7 +81,11 @@ ledger from a previous run.
 
 `config.toml` holds the runtime defaults:
 
-- `email`, `crossref_rows`, `timeout_seconds`: Crossref request settings
+- `email`: contact address for the Crossref and OpenAlex polite pools, empty
+  by default. `PAPER_DOWNLOADER_EMAIL` in `.env` overrides it.
+- `crossref_rows`, `timeout_seconds`: Crossref request settings. Crossref
+  caps a page at 1000 results, so larger `crossref_rows` values are clamped
+  to 1000 rather than truncating the DOI list.
 - `doi_file` / `doi_files`: default DOI queue file(s) for `paper-download`
   and `paper-export-metadata`, so you can run them without `--dois-file`
 - `inter_download_sleep_seconds`: pause between PDF downloads (default 3s)

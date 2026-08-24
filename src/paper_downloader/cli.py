@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._http import set_polite_pool_email
 from .audit import build_download_audit_summary, format_download_audit_summary
 from .config import (
     DEFAULT_CONFIG_PATH,
@@ -240,7 +241,7 @@ def merge_config(parsed_args: argparse.Namespace, file_config: AppConfig) -> App
     cli_base_url = getattr(parsed_args, "base_url", None)
     cli_email = getattr(parsed_args, "email", None)
 
-    return AppConfig(
+    merged_config = AppConfig(
         base_urls=parse_base_urls(cli_base_url)
         if cli_base_url is not None
         else file_config.base_urls,
@@ -255,6 +256,12 @@ def merge_config(parsed_args: argparse.Namespace, file_config: AppConfig) -> App
         pdfs_dir=file_config.pdfs_dir,
         inter_download_sleep_seconds=file_config.inter_download_sleep_seconds,
     )
+
+    # Every entrypoint merges config before doing network work, so this is the
+    # one place that has to publish the contact address to the HTTP layer. It
+    # stays empty unless the operator configured one.
+    set_polite_pool_email(merged_config.email)
+    return merged_config
 
 
 def build_download_config(app_config: AppConfig) -> DownloadConfig:
@@ -281,7 +288,14 @@ def run_fetch_dois(parsed_args: argparse.Namespace) -> int:
         email=app_config.email,
         rows=app_config.crossref_rows,
     )
-    dois_file_path = write_doi_file(app_config.dois_dir, issn, doi_list)
+
+    # A syntactically valid ISSN that no provider indexes is a normal outcome,
+    # not a crash, so report it as a clean failure instead of a traceback.
+    try:
+        dois_file_path = write_doi_file(app_config.dois_dir, issn, doi_list)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
     print(f"Saved {len(doi_list)} DOIs to {dois_file_path}")
     return 0
 

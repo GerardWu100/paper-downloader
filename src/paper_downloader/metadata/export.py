@@ -45,7 +45,10 @@ from ..providers import crossref, openalex
 
 DEFAULT_TIMEOUT_SECONDS: int = 60
 DEFAULT_METADATA_MAX_WORKERS: int = 8
-DEFAULT_REQUEST_DELAY_SECONDS: float = 0.05
+# OpenAlex documents a 10 requests-per-second ceiling per contact address,
+# and the pacer spaces request starts per provider host, so 0.1s keeps the
+# worker pool at that ceiling instead of twice it.
+DEFAULT_REQUEST_DELAY_SECONDS: float = 0.1
 MARKUP_TAG_PATTERN = re.compile(r"<[^>]+>")
 ORCID_URL_PREFIX_PATTERN = re.compile(r"^https?://orcid\.org/", re.IGNORECASE)
 
@@ -289,12 +292,13 @@ def fetch_crossref_work(
 def fetch_openalex_work(
     doi: str,
     timeout_seconds: int,
+    email: str | None = None,
     fetch_json: JsonFetcher = fetch_json_payload,
 ) -> JsonObject | None:
     """Fetch one OpenAlex work object for a DOI."""
     payload = fetch_json(
-        openalex.build_work_url(doi),
-        openalex.build_headers(),
+        openalex.build_work_url(doi, email),
+        openalex.build_headers(email),
         timeout_seconds,
     )
 
@@ -660,6 +664,7 @@ def build_metadata_record(
         openalex_work = fetch_openalex_work(
             doi=doi,
             timeout_seconds=timeout_seconds,
+            email=email,
             fetch_json=fetch_json,
         )
     except Exception as exc:  # noqa: BLE001

@@ -5,7 +5,10 @@ scholarly metadata service.
 
 - `crossref.py` owns Crossref URL construction, polite-pool headers, the
   `message` envelope, and publication-date parsing.
-- `openalex.py` owns OpenAlex source and work URL construction plus headers.
+- `openalex.py` owns OpenAlex source and work URL construction plus headers,
+  including the polite-pool contact address. OpenAlex takes that address
+  both as a `mailto` query field and in the `User-Agent`, so this module
+  adds both, and omits both when no address is configured.
 
 ## What belongs here
 
@@ -23,7 +26,7 @@ the exporter uses the full `YYYY-MM-DD` string.
 ## What does not belong here
 
 - HTTP transport. Provider modules build URLs and headers; `_http.py` performs
-  the request. A pass-through fetch wrapper in a provider module is a mistake,
+  the request, including retry with backoff on 429 and 5xx responses. A pass-through fetch wrapper in a provider module is a mistake,
   because the module name then implies a provider restriction the code does not
   have.
 - Merging across providers. Deciding that Crossref wins over OpenAlex for a

@@ -17,6 +17,9 @@ import tomllib
 ROOT_DIR: Path = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CONFIG_PATH: Path = ROOT_DIR / "config.toml"
 DEFAULT_ENV_PATH: Path = ROOT_DIR / ".env"
+# Unset by default. Operators supply their own address; the project never
+# invents one on their behalf.
+DEFAULT_POLITE_POOL_EMAIL: str = ""
 REMOVED_BROWSER_CONFIG_KEYS: frozenset[str] = frozenset(
     {
         "use_browser",
@@ -204,11 +207,29 @@ def _resolve_configured_email(
     raw_config: dict[str, object],
     env_values: dict[str, str],
 ) -> str:
-    """Resolve the polite-pool email with `.env` taking priority."""
+    """Resolve the polite-pool contact address, with `.env` taking priority.
+
+    The default is an empty string. Crossref and OpenAlex both treat a contact
+    address as an identity claim, so this project never substitutes a
+    placeholder: an unset address means requests go out anonymously, and DOI
+    collection refuses to run at all.
+
+    Parameters
+    ----------
+    raw_config:
+        Decoded `config.toml` mapping.
+    env_values:
+        Values loaded from a local `.env` file, which override the TOML value.
+
+    Returns
+    -------
+    str
+        Trimmed contact address, or an empty string when none is configured.
+    """
     return str(
         env_values.get(
             "PAPER_DOWNLOADER_EMAIL",
-            str(raw_config.get("email", "your_email@example.com")).strip(),
+            str(raw_config.get("email", DEFAULT_POLITE_POOL_EMAIL)).strip(),
         )
     ).strip()
 

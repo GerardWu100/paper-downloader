@@ -93,10 +93,30 @@ def normalize_doi_list(raw_dois: list[str]) -> list[str]:
 
 def fetch_openalex_source_id(
     issn: str,
+    email: str | None = None,
     fetch_json: JsonFetcher = fetch_json_payload,
 ) -> str | None:
-    """Resolve an OpenAlex source identifier from one ISSN."""
-    payload = fetch_json(openalex.build_source_url(issn), openalex.build_headers())
+    """Resolve an OpenAlex source identifier from one ISSN.
+
+    Parameters
+    ----------
+    issn:
+        Journal ISSN to look up.
+    email:
+        Polite-pool contact address, or ``None`` to use the configured
+        process-wide address.
+    fetch_json:
+        Injectable JSON fetcher.
+
+    Returns
+    -------
+    str or None
+        Bare OpenAlex source identifier, or ``None`` when the ISSN is unknown.
+    """
+    payload = fetch_json(
+        openalex.build_source_url(issn, email),
+        openalex.build_headers(email),
+    )
     source_id = payload.get("id")
 
     if not isinstance(source_id, str):
@@ -111,10 +131,33 @@ def fetch_openalex_source_id(
 def fetch_openalex_dois(
     issn: str,
     rows: int,
+    email: str | None = None,
     fetch_json: JsonFetcher = fetch_json_payload,
 ) -> list[str]:
-    """Collect DOI values for one ISSN from OpenAlex."""
-    source_id = fetch_openalex_source_id(issn=issn, fetch_json=fetch_json)
+    """Collect DOI values for one ISSN from OpenAlex.
+
+    Parameters
+    ----------
+    issn:
+        Journal ISSN to collect works for.
+    rows:
+        Requested page size, clamped to ``OPENALEX_MAX_PER_PAGE``.
+    email:
+        Polite-pool contact address, or ``None`` to use the configured
+        process-wide address.
+    fetch_json:
+        Injectable JSON fetcher.
+
+    Returns
+    -------
+    list[str]
+        Normalized, de-duplicated, sorted DOI strings.
+    """
+    source_id = fetch_openalex_source_id(
+        issn=issn,
+        email=email,
+        fetch_json=fetch_json,
+    )
 
     if source_id is None:
         return []
@@ -122,8 +165,8 @@ def fetch_openalex_dois(
     per_page = min(rows, OPENALEX_MAX_PER_PAGE)
 
     def fetch_page(cursor: str) -> JsonObject:
-        page_url = openalex.build_works_cursor_url(source_id, per_page, cursor)
-        return fetch_json(page_url, openalex.build_headers())
+        page_url = openalex.build_works_cursor_url(source_id, per_page, cursor, email)
+        return fetch_json(page_url, openalex.build_headers(email))
 
     def extract_page_dois(payload: JsonObject) -> list[str]:
         return [
@@ -160,10 +203,30 @@ def fetch_crossref_dois(
     rows: int,
     fetch_json: JsonFetcher = fetch_json_payload,
 ) -> list[str]:
-    """Collect DOI values for one ISSN from Crossref."""
+    """Collect DOI values for one ISSN from Crossref.
+
+    Parameters
+    ----------
+    issn:
+        Journal ISSN to filter works by.
+    email:
+        Polite-pool contact address sent to Crossref.
+    rows:
+        Requested page size. Crossref caps this at
+        ``crossref.CROSSREF_MAX_ROWS_PER_PAGE``, so the value is clamped here
+        before use. Without the clamp, a larger request produces a capped page
+        that looks short, and pagination stops after the first page with a
+        silently truncated DOI list.
+
+    Returns
+    -------
+    list[str]
+        Normalized, de-duplicated, sorted DOI strings.
+    """
+    page_size = min(rows, crossref.CROSSREF_MAX_ROWS_PER_PAGE)
 
     def fetch_page(cursor: str) -> JsonObject:
-        page_url = crossref.build_works_cursor_url(issn, rows, cursor, email)
+        page_url = crossref.build_works_cursor_url(issn, page_size, cursor, email)
         return fetch_json(page_url, crossref.build_polite_headers(email))
 
     def extract_page_items(payload: JsonObject) -> list[JsonObject]:
@@ -183,8 +246,10 @@ def fetch_crossref_dois(
 
     def extract_next_cursor(payload: JsonObject) -> str | None:
         # Crossref keeps returning a cursor past the end of the result set, so
-        # a short page is the reliable signal that the crawl is finished.
-        if len(extract_page_items(payload)) < rows:
+        # a short page is the reliable signal that the crawl is finished. The
+        # comparison uses the clamped page size, because that is what Crossref
+        # actually returns for a full page.
+        if len(extract_page_items(payload)) < page_size:
             return None
 
         message_object = crossref.extract_message(payload)
@@ -213,6 +278,7 @@ def fetch_all_dois_for_issn(
     openalex_dois = fetch_openalex_dois(
         issn=issn,
         rows=rows,
+        email=email,
         fetch_json=fetch_json,
     )
     crossref_dois = fetch_crossref_dois(

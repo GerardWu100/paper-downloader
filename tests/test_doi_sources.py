@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from paper_downloader import doi_sources
+from paper_downloader.providers import crossref
 
 
 def test_normalize_doi_list_strips_urls_and_sorts() -> None:
@@ -216,3 +217,96 @@ def test_write_doi_file_persists_sorted_values(tmp_path: Path) -> None:
     )
 
     assert output_path.read_text(encoding="utf-8") == "10.1/foo\n10.2/bar\n"
+
+
+def test_fetch_crossref_dois_paginates_when_rows_exceeds_page_cap() -> None:
+    """A request above Crossref's page cap must not stop after one page.
+
+    Crossref silently caps `rows` at 1000, so a full first page looks short
+    against a larger requested value. Without clamping, pagination stopped
+    there and the DOI list was silently truncated.
+    """
+    page_size = crossref.CROSSREF_MAX_ROWS_PER_PAGE
+    first_page_dois = [f"10.1/first{index}" for index in range(page_size)]
+
+    def fake_fetch(url: str, headers: dict[str, str] | None) -> dict[str, object]:
+        assert f"rows={page_size}" in url
+
+        if "cursor=%2A" in url:
+            return {
+                "message": {
+                    "items": [{"DOI": doi} for doi in first_page_dois],
+                    "next-cursor": "second-page",
+                }
+            }
+
+        if "cursor=second-page" in url:
+            return {
+                "message": {
+                    "items": [{"DOI": "10.2/second"}],
+                    "next-cursor": "",
+                }
+            }
+
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    dois = doi_sources.fetch_crossref_dois(
+        issn="1467-9965",
+        email="you@example.com",
+        rows=page_size * 5,
+        fetch_json=fake_fetch,
+    )
+
+    assert len(dois) == page_size + 1
+    assert "10.2/second" in dois
+
+
+def test_fetch_openalex_dois_sends_contact_email_when_configured() -> None:
+    """A configured contact address should reach OpenAlex on every request."""
+    seen_urls: list[str] = []
+    seen_user_agents: list[str] = []
+
+    def fake_fetch(url: str, headers: dict[str, str] | None) -> dict[str, object]:
+        seen_urls.append(url)
+        seen_user_agents.append((headers or {}).get("User-Agent", ""))
+
+        if "sources/issn:" in url:
+            return {"id": "https://openalex.org/S123"}
+
+        return {"results": [{"doi": "10.1/foo"}], "meta": {"next_cursor": ""}}
+
+    doi_sources.fetch_openalex_dois(
+        issn="1467-9965",
+        rows=200,
+        email="person@example.org",
+        fetch_json=fake_fetch,
+    )
+
+    assert seen_urls
+    assert all("mailto=person%40example.org" in url for url in seen_urls)
+    assert all(
+        "(mailto:person@example.org)" in user_agent for user_agent in seen_user_agents
+    )
+
+
+def test_fetch_openalex_dois_omits_contact_email_when_unset() -> None:
+    """Without a configured address, requests must not carry a `mailto`."""
+    seen_urls: list[str] = []
+
+    def fake_fetch(url: str, headers: dict[str, str] | None) -> dict[str, object]:
+        seen_urls.append(url)
+
+        if "sources/issn:" in url:
+            return {"id": "https://openalex.org/S123"}
+
+        return {"results": [{"doi": "10.1/foo"}], "meta": {"next_cursor": ""}}
+
+    doi_sources.fetch_openalex_dois(
+        issn="1467-9965",
+        rows=200,
+        email="",
+        fetch_json=fake_fetch,
+    )
+
+    assert seen_urls
+    assert all("mailto" not in url for url in seen_urls)

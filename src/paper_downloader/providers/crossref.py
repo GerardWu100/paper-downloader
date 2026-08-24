@@ -13,6 +13,11 @@ from .._http import DEFAULT_HTTP_USER_AGENT, JsonObject
 
 CROSSREF_WORKS_URL: str = "https://api.crossref.org/works"
 
+# Crossref silently caps `rows` at 1000. Asking for more returns a 1000-item
+# page, so callers must compare page length against this cap rather than
+# against the number they requested.
+CROSSREF_MAX_ROWS_PER_PAGE: int = 1000
+
 # Crossref exposes the publication date under several keys. The generic
 # `published` field is the most reliable, so it is tried first and the more
 # specific variants act as fallbacks.
@@ -25,6 +30,7 @@ PUBLICATION_DATE_KEYS: tuple[str, ...] = (
 MAX_DATE_PARTS: int = 3
 
 __all__ = [
+    "CROSSREF_MAX_ROWS_PER_PAGE",
     "CROSSREF_WORKS_URL",
     "MAX_DATE_PARTS",
     "PUBLICATION_DATE_KEYS",

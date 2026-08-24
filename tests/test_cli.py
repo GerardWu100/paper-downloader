@@ -420,7 +420,7 @@ def test_run_export_metadata_uses_configured_doi_file_list_in_order(
         email: str,
         timeout_seconds: int = 60,
         max_workers: int = 8,
-        request_delay_seconds: float = 0.05,
+        request_delay_seconds: float = 0.1,
     ) -> Path:
         seen_exports.append(
             (
@@ -440,8 +440,8 @@ def test_run_export_metadata_uses_configured_doi_file_list_in_order(
 
     assert exit_code == 0
     assert seen_exports == [
-        (("10.1111/first",), "1467-9965_metadata.csv", "8", "0.05"),
-        (("10.2222/second",), "2214-6369_metadata.csv", "8", "0.05"),
+        (("10.1111/first",), "1467-9965_metadata.csv", "8", "0.1"),
+        (("10.2222/second",), "2214-6369_metadata.csv", "8", "0.1"),
     ]
 
 
@@ -480,3 +480,34 @@ def test_run_export_metadata_rejects_output_csv_for_multiple_batches(
         )
     else:  # pragma: no cover
         raise AssertionError("Expected SystemExit")
+
+
+def test_run_fetch_dois_exits_cleanly_when_no_dois_are_found(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A valid ISSN that returns nothing should exit cleanly, not traceback."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'base_url = "https://publisher.example/pdf"',
+                'email = "person@example.org"',
+                "crossref_rows = 1000",
+                "timeout_seconds = 60",
+                'dois_dir = "data/interim/doi_queues"',
+                'metadata_dir = "outputs/metadata"',
+                'pdfs_dir = "outputs/pdfs"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    parsed_args = cli.parse_fetch_dois_args(["--issn", "9999-9999"])
+    parsed_args.config = config_path
+
+    monkeypatch.setattr(cli, "fetch_all_dois_for_issn", lambda **kwargs: [])
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.run_fetch_dois(parsed_args)
+
+    assert "9999-9999" in str(exit_info.value)

@@ -12,11 +12,48 @@ def setup_function() -> None:
     naming.lookup_doi_metadata.cache_clear()
 
 
-def test_sanitize_doi_for_filename_replaces_slash_and_colon() -> None:
-    """DOI marker text should be filesystem-safe."""
+def test_sanitize_doi_for_filename_keeps_ordinary_dois_readable() -> None:
+    """An ordinary DOI should escape only its slash."""
     assert (
-        naming.sanitize_doi_for_filename("10.1111/mafi:12108") == "10.1111__mafi_12108"
+        naming.sanitize_doi_for_filename("10.1111/mafi.12108") == "10.1111__mafi.12108"
     )
+
+
+def test_sanitize_doi_for_filename_replaces_characters_a_filesystem_rejects() -> None:
+    """A colon should not survive into the filename."""
+    marker = naming.sanitize_doi_for_filename("10.1111/mafi:12108")
+
+    assert ":" not in marker
+    assert marker.startswith("10.1111__mafi_12108")
+
+
+def test_sanitize_doi_for_filename_separates_dois_that_escape_alike() -> None:
+    """Two DOIs whose plain escape matches must get different markers.
+
+    Both pairs below escape to the same text under a plain substitution: the
+    first because a colon and an underscore both become an underscore, the
+    second because a slash and a literal double underscore both become ``__``.
+    A shared marker would make resume treat one DOI as already downloaded.
+    """
+    colliding_doi_pairs = [
+        ("10.1111/mafi:12108", "10.1111/mafi_12108"),
+        ("10.1575/1912/2489", "10.1575/1912__2489"),
+    ]
+
+    for first_doi, second_doi in colliding_doi_pairs:
+        first_marker = naming.sanitize_doi_for_filename(first_doi)
+        second_marker = naming.sanitize_doi_for_filename(second_doi)
+
+        assert first_marker != second_marker
+
+
+def test_sanitize_doi_for_filename_is_stable_across_calls() -> None:
+    """Markers must be deterministic, or resume would miss its own files."""
+    disambiguated_doi = "10.1111/mafi:12108"
+
+    assert naming.sanitize_doi_for_filename(
+        disambiguated_doi
+    ) == naming.sanitize_doi_for_filename(disambiguated_doi)
 
 
 def test_sanitize_title_for_filename_normalizes_text() -> None:

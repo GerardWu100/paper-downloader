@@ -131,3 +131,20 @@ def test_reconcile_pending_dois_does_not_trust_corrupt_existing_pdf(
 
     assert decisions.pending_dois == ["10.1/foo"]
     assert decisions.existing_pdf_dois == []
+
+
+def test_remove_dois_from_log_leaves_no_temporary_file(tmp_path: Path) -> None:
+    """Ledger rewrites should land atomically and clean up their staging file."""
+    error_path = tmp_path / "1467-9965_errors.txt"
+    error_path.write_text(
+        "doi=10.1/keep | status=download_error\ndoi=10.2/drop | status=download_error\n",
+        encoding="utf-8",
+    )
+
+    progress.remove_dois_from_log(error_path, {"10.2/drop"})
+
+    remaining_names = sorted(path.name for path in tmp_path.iterdir())
+
+    assert remaining_names == ["1467-9965_errors.txt"]
+    assert "10.1/keep" in error_path.read_text(encoding="utf-8")
+    assert "10.2/drop" not in error_path.read_text(encoding="utf-8")

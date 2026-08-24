@@ -41,8 +41,16 @@ CONTENT_DISPOSITION_FILENAME_PATTERN = re.compile(
     r'filename="?([^";]+)"?',
     re.IGNORECASE,
 )
-HTML_CITATION_PDF_URL_PATTERN = re.compile(
-    r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)["\']',
+# Publishers emit the citation_pdf_url meta tag with the attributes in either
+# order, so the tag is matched first and its attributes are read separately
+# rather than pinning `name` before `content`.
+HTML_META_TAG_PATTERN = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+HTML_META_NAME_PATTERN = re.compile(
+    r'\bname\s*=\s*["\']?citation_pdf_url["\']?',
+    re.IGNORECASE,
+)
+HTML_META_CONTENT_PATTERN = re.compile(
+    r'\bcontent\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s"\'>]+))',
     re.IGNORECASE,
 )
 HTML_IFRAME_EMBED_PATTERN = re.compile(
@@ -72,6 +80,10 @@ PDF_CANDIDATE_PREFIXES: tuple[str, ...] = (
     "/doi/epdf/",
 )
 INCOMPLETE_READ_RETRY_COUNT: int = 3
+# Downloads land on a temporary file first and are renamed into place only
+# after the bytes are written. A crash between those two steps leaves the
+# temporary file behind, so batches sweep the prefix before starting.
+PARTIAL_DOWNLOAD_FILENAME_PREFIX: str = ".partial_"
 HttpFetcher: TypeAlias = Callable[
     [str, int, str, str | None],
     "BinaryHttpResponse",
@@ -304,6 +316,45 @@ def normalize_pdf_candidate_url(raw_candidate_url: str, page_url: str) -> str | 
     return None
 
 
+def extract_citation_pdf_urls(html_text: str) -> list[str]:
+    """Return every `citation_pdf_url` value declared in one HTML page.
+
+    Parameters
+    ----------
+    html_text:
+        Decoded HTML body of a publisher landing page.
+
+    Returns
+    -------
+    list[str]
+        Raw `content` values, in document order, from meta tags whose `name`
+        is `citation_pdf_url`. Attribute order and quoting style do not matter,
+        so both ``<meta name="citation_pdf_url" content="...">`` and
+        ``<meta content="..." name="citation_pdf_url">`` are found.
+    """
+    citation_pdf_urls: list[str] = []
+
+    for meta_tag_match in HTML_META_TAG_PATTERN.finditer(html_text):
+        meta_tag = meta_tag_match.group(0)
+
+        if HTML_META_NAME_PATTERN.search(meta_tag) is None:
+            continue
+
+        content_match = HTML_META_CONTENT_PATTERN.search(meta_tag)
+
+        if content_match is None:
+            continue
+
+        # Exactly one of the three alternatives (double-quoted, single-quoted,
+        # unquoted) matches, so the first non-None group is the value.
+        content_value = next(
+            group for group in content_match.groups() if group is not None
+        )
+        citation_pdf_urls.append(content_value)
+
+    return citation_pdf_urls
+
+
 def extract_pdf_candidate_urls(html_text: str, page_url: str) -> list[str]:
     """Extract likely PDF or PDF-viewer target URLs from one HTML page."""
     candidate_urls: list[str] = []
@@ -324,8 +375,8 @@ def extract_pdf_candidate_urls(html_text: str, page_url: str) -> list[str]:
         seen_urls.add(normalized_candidate_url)
         candidate_urls.append(normalized_candidate_url)
 
-    for match in HTML_CITATION_PDF_URL_PATTERN.finditer(html_text):
-        add_candidate(match.group(1))
+    for citation_pdf_url in extract_citation_pdf_urls(html_text):
+        add_candidate(citation_pdf_url)
 
     for match in HTML_IFRAME_EMBED_PATTERN.finditer(html_text):
         add_candidate(match.group(1))
@@ -437,7 +488,8 @@ def choose_base_filename(
     ----------
     response:
         Validated PDF response, used for its `Content-Disposition` header and
-        final URL.
+        final URL. Both are attacker-influenced, so the name they suggest is
+        sanitized before use.
     metadata_title:
         Article title from DOI metadata, or ``None`` when the lookup found no
         title or could not run.
@@ -459,6 +511,17 @@ def choose_base_filename(
 
     if Path(response_filename).suffix.lower() != ".pdf":
         response_filename = "article.pdf"
+
+    # The server chose this name, so it goes through the same cleaning as a
+    # metadata title before it can reach the filesystem.
+    sanitized_response_stem = naming.sanitize_title_for_filename(
+        Path(response_filename).stem
+    )
+    response_filename = (
+        "article.pdf"
+        if sanitized_response_stem is None
+        else f"{sanitized_response_stem}.pdf"
+    )
 
     # Metadata is useful for readable filenames, but it is optional. A PDF that
     # has already been fetched and validated should still be saved if Crossref
@@ -494,7 +557,47 @@ def build_temp_pdf_path(output_dir: Path, doi: str) -> Path:
     """Build the temporary PDF path used before atomic rename."""
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     safe_doi = naming.sanitize_doi_for_filename(doi)
-    return output_dir / f".partial_{timestamp}_{safe_doi}.pdf"
+    return output_dir / f"{PARTIAL_DOWNLOAD_FILENAME_PREFIX}{timestamp}_{safe_doi}.pdf"
+
+
+def remove_orphaned_partial_downloads(pdf_root_dir: Path) -> int:
+    """Delete temporary download files left behind by an interrupted run.
+
+    A saved PDF is written to a `.partial_*` file and then renamed into place,
+    so any `.partial_*` file still present when a batch starts belongs to a run
+    that died mid-write. Nothing can resume those bytes, and leaving them there
+    grows the output directory without bound.
+
+    Parameters
+    ----------
+    pdf_root_dir:
+        Root of the PDF output hierarchy. A missing directory is not an error,
+        because a first run has no output yet.
+
+    Returns
+    -------
+    int
+        Number of temporary files removed. Files that cannot be deleted are
+        skipped rather than raised on, so a permission problem in the output
+        tree never stops a download batch.
+    """
+    if not pdf_root_dir.exists():
+        return 0
+
+    removed_file_count = 0
+
+    for partial_path in pdf_root_dir.rglob(f"{PARTIAL_DOWNLOAD_FILENAME_PREFIX}*"):
+        if not partial_path.is_file():
+            continue
+
+        try:
+            partial_path.unlink()
+        except OSError:
+            continue
+
+        removed_file_count += 1
+
+    return removed_file_count
 
 
 def save_pdf_response(
@@ -627,6 +730,14 @@ def _prepare_resumable_download(
         Pending DOI worklist plus mutable success and error ledger sets used by
         :func:`run_download_pass`.
     """
+    removed_partial_count = remove_orphaned_partial_downloads(config.pdf_root_dir)
+
+    if removed_partial_count:
+        print(
+            f"Removed {removed_partial_count} orphaned partial download(s) "
+            f"under {config.pdf_root_dir}"
+        )
+
     successful_logged_dois = load_logged_doi_list(progress_files.success_path)
     errored_logged_dois = load_logged_doi_list(progress_files.error_path)
     resume_decisions = reconcile_pending_dois(

@@ -885,3 +885,62 @@ def test_fetch_binary_response_retries_incomplete_read(monkeypatch) -> None:
     assert urlopen_call_count == 3
     assert response.status_code == 200
     assert response.body == complete_pdf_bytes
+
+
+def test_extract_citation_pdf_urls_ignores_attribute_order() -> None:
+    """The citation_pdf_url tag should be found whichever attribute comes first."""
+    html_text = (
+        '<meta name="citation_pdf_url" content="https://example.org/a.pdf">'
+        "<meta content='https://example.org/b.pdf' name='citation_pdf_url'>"
+        "<META NAME=citation_pdf_url CONTENT=https://example.org/c.pdf>"
+        '<meta name="citation_title" content="Not A PDF">'
+    )
+
+    assert downloader.extract_citation_pdf_urls(html_text) == [
+        "https://example.org/a.pdf",
+        "https://example.org/b.pdf",
+        "https://example.org/c.pdf",
+    ]
+
+
+def test_remove_orphaned_partial_downloads_clears_crash_leftovers(
+    tmp_path: Path,
+) -> None:
+    """Temporary files from an interrupted run should be swept, saved PDFs kept."""
+    output_dir = tmp_path / "1467-9965" / "2024"
+    output_dir.mkdir(parents=True)
+    orphaned_partial = output_dir / ".partial_20240101_120000_10.1__x.pdf"
+    orphaned_partial.write_bytes(b"%PDF-1.4 truncated")
+    saved_pdf = output_dir / "paper__doi_10.1__x.pdf"
+    saved_pdf.write_bytes(b"%PDF-1.4 complete")
+
+    removed_count = downloader.remove_orphaned_partial_downloads(tmp_path)
+
+    assert removed_count == 1
+    assert not orphaned_partial.exists()
+    assert saved_pdf.exists()
+
+
+def test_remove_orphaned_partial_downloads_tolerates_missing_root(
+    tmp_path: Path,
+) -> None:
+    """A first run has no output directory yet, which is not an error."""
+    assert downloader.remove_orphaned_partial_downloads(tmp_path / "absent") == 0
+
+
+def test_choose_base_filename_sanitizes_server_supplied_name() -> None:
+    """A hostile `Content-Disposition` name must not reach the filesystem raw."""
+    response = downloader.BinaryHttpResponse(
+        url="https://example.org/download",
+        status_code=200,
+        headers={
+            "content-disposition": 'attachment; filename="../../etc/pa:ss?wd.pdf"'
+        },
+        body=b"%PDF-1.4",
+    )
+
+    base_filename = downloader.choose_base_filename(response)
+
+    assert base_filename == "pa ss wd.pdf"
+    assert "/" not in base_filename
+    assert ":" not in base_filename

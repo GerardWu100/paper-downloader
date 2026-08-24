@@ -8,6 +8,7 @@ as already-complete work during resume reconciliation.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,6 +26,10 @@ from .naming import collect_completed_doi_suffixes, sanitize_doi_for_filename
 # Queue files are named `<issn>_dois.txt`; their ledgers reuse the same stem
 # with a different suffix. One list keeps that convention in a single place.
 QUEUE_FILE_STEM_SUFFIXES: tuple[str, ...] = ("_dois", "_successful", "_errors")
+
+# Suffix for the sibling file that ledger rewrites are staged in before the
+# atomic rename onto the real path.
+LEDGER_TEMP_FILE_SUFFIX: str = ".tmp"
 
 
 @dataclass(frozen=True)
@@ -61,8 +66,26 @@ def _rewrite_locked_text_file(
     file_path: Path,
     transform_line: Callable[[str], str | None],
 ) -> None:
-    """Rewrite one text file in place while holding an exclusive lock."""
-    with file_path.open("r+", encoding="utf-8") as file_handle:
+    """Rewrite one text file atomically while holding an exclusive lock.
+
+    The new contents are written to a sibling temporary file, flushed to disk,
+    and then renamed over the original. A crash therefore leaves either the old
+    ledger or the new one, never a half-truncated file, which matters because
+    these ledgers are the only record of which DOIs are already done.
+
+    Parameters
+    ----------
+    file_path:
+        Existing text file to rewrite.
+    transform_line:
+        Called with each raw line, including its newline. Returns the
+        replacement line, or ``None`` to drop the line.
+    """
+    temp_path = file_path.with_name(f"{file_path.name}{LEDGER_TEMP_FILE_SUFFIX}")
+
+    # The lock is held on the original file for the whole read-and-replace, so
+    # a second process cannot interleave its own rewrite of the same ledger.
+    with file_path.open("r", encoding="utf-8") as file_handle:
         if fcntl is not None:
             fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX)
 
@@ -77,10 +100,15 @@ def _rewrite_locked_text_file(
 
                 remaining_lines.append(transformed_line)
 
-            file_handle.seek(0)
-            file_handle.truncate()
-            file_handle.write("".join(remaining_lines))
+            with temp_path.open("w", encoding="utf-8") as temp_handle:
+                temp_handle.write("".join(remaining_lines))
+                temp_handle.flush()
+                os.fsync(temp_handle.fileno())
+
+            os.replace(temp_path, file_path)
         finally:
+            temp_path.unlink(missing_ok=True)
+
             if fcntl is not None:
                 fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
 

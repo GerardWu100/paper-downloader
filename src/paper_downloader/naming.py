@@ -9,6 +9,7 @@ This module handles two related jobs:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from collections.abc import Callable
@@ -32,6 +33,19 @@ PDF_MIN_VALID_SIZE_BYTES: int = 64
 INVALID_FILENAME_CHARACTERS_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 WHITESPACE_NORMALIZER = re.compile(r"\s+")
 
+# A DOI slash becomes a double underscore in filenames; every other character
+# that a filesystem rejects becomes a single underscore. That substitution is
+# lossy on its own, so `sanitize_doi_for_filename` appends a digest whenever it
+# is, which is what keeps two different DOIs from sharing one filename.
+DOI_FILENAME_SLASH_ESCAPE: str = "__"
+DOI_FILENAME_DISAMBIGUATOR_MARKER: str = "_h"
+DOI_FILENAME_DISAMBIGUATOR_HEX_LENGTH: int = 16
+UNSAFE_DOI_CHARACTER_PATTERN = re.compile(r'[<>:"\\|?*\x00-\x1f]')
+DOI_FILENAME_DISAMBIGUATOR_PATTERN = re.compile(
+    rf"{DOI_FILENAME_DISAMBIGUATOR_MARKER}[0-9a-f]"
+    rf"{{{DOI_FILENAME_DISAMBIGUATOR_HEX_LENGTH}}}$"
+)
+
 JsonFetcher = Callable[[str], JsonObject]
 
 
@@ -44,10 +58,80 @@ def fetch_json_payload(url: str) -> JsonObject:
     )
 
 
+def _escape_doi_for_filename(normalized_doi: str) -> str:
+    """Replace the characters a filesystem rejects in one normalized DOI."""
+    escaped_characters: list[str] = []
+
+    for character in normalized_doi:
+        if character == "/":
+            escaped_characters.append(DOI_FILENAME_SLASH_ESCAPE)
+            continue
+
+        if UNSAFE_DOI_CHARACTER_PATTERN.match(character):
+            escaped_characters.append("_")
+            continue
+
+        escaped_characters.append(character)
+
+    return "".join(escaped_characters)
+
+
+def _unescape_doi_filename_fragment(fragment: str) -> str:
+    """Undo the slash escape in one marker fragment.
+
+    This is the only part of the escape that carries information back, because
+    a single underscore in a fragment can come from either a literal underscore
+    in the DOI or from a rejected character. The caller compares the result
+    against the original DOI to find out whether that ambiguity actually bites.
+    """
+    return fragment.replace(DOI_FILENAME_SLASH_ESCAPE, "/")
+
+
 def sanitize_doi_for_filename(doi: str) -> str:
-    """Convert one DOI into a filesystem-safe marker fragment."""
+    """Convert one DOI into a filesystem-safe marker fragment.
+
+    Two different DOIs must never produce the same fragment: resume scanning
+    reads the fragment back out of saved filenames, so a shared fragment would
+    make the downloader treat a DOI it never fetched as already complete and
+    skip it on every later run.
+
+    The plain escape (``/`` to ``__``, other rejected characters to ``_``) is
+    kept whenever it is unambiguous, which is the case for ordinary DOIs such
+    as ``10.1111/mafi.12108``. When the escape is lossy, a short digest of the
+    full DOI is appended so the two DOIs land on different filenames.
+
+    Parameters
+    ----------
+    doi:
+        DOI text from any source. It is normalized before escaping, so DOI URL
+        prefixes and letter case do not change the result.
+
+    Returns
+    -------
+    str
+        Filename fragment. For ``10.1111/mafi.12108`` this is
+        ``10.1111__mafi.12108``; for ``10.1111/mafi:12108`` it is
+        ``10.1111__mafi_12108`` plus a digest, because the plain form is
+        already claimed by ``10.1111/mafi_12108``.
+    """
     normalized_doi = normalize_doi(doi)
-    return normalized_doi.replace("/", "__").replace(":", "_")
+    escaped_fragment = _escape_doi_for_filename(normalized_doi)
+
+    # The fragment is safe to use as-is only when it reverses back to the exact
+    # DOI, and when it cannot be mistaken for a fragment that already carries a
+    # digest. Both checks together make this function injective.
+    if _unescape_doi_filename_fragment(
+        escaped_fragment
+    ) == normalized_doi and not DOI_FILENAME_DISAMBIGUATOR_PATTERN.search(
+        escaped_fragment
+    ):
+        return escaped_fragment
+
+    doi_digest = hashlib.blake2b(
+        normalized_doi.encode("utf-8"),
+        digest_size=DOI_FILENAME_DISAMBIGUATOR_HEX_LENGTH // 2,
+    ).hexdigest()
+    return f"{escaped_fragment}{DOI_FILENAME_DISAMBIGUATOR_MARKER}{doi_digest}"
 
 
 def normalize_title_text(raw_title: object) -> str | None:
