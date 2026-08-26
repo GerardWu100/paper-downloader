@@ -116,7 +116,3 @@ for the full architecture and module-by-module reference.
 - `outputs/metadata/<issn>_metadata.csv`: exported metadata
 - `outputs/pdfs/<issn>/<year>/*.pdf`: downloaded PDFs, named with a DOI
   marker for resume detection
-
-## License
-
-All rights reserved. See [LICENSE](LICENSE).
