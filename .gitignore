@@ -27,6 +27,8 @@ secrets.toml
 *.secret
 .netrc
 .DS_Store
+._*
+__MACOSX/
 .vscode/
 .idea/
 *.log
@@ -36,3 +38,9 @@ outputs/runs/
 pdfs/
 data/interim/doi_queues/*_successful.txt
 data/interim/doi_queues/*_errors.txt
+
+# Obsidian vault state. Markdown notes stay tracked.
+.obsidian/
+.obsidian-*/
+.obsidian.vimrc
+.trash/
